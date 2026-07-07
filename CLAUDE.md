@@ -65,7 +65,66 @@ Free hours are a **recurring monthly plan allowance**, not accrued/earned:
 - Consumed only when booking an **hourly** space with `Space.uses_free_hours=True`: `BookingCreateSerializer` validates balance, deducts atomically (`select_for_update`), marks booking `is_free`/`price=None`, and snapshots `Booking.free_hours_used`.
 - Cancel → `_refund_free_hours()` (in `views.py`) returns exactly `free_hours_used` to the balance.
 
+## Deployment — AWS via Terraform/OpenTofu (`terraform/`, Option A)
+Infra-as-code for `AWS_DEPLOY.md` **Option A** (single EC2 + RDS + S3 + SES) lives in
+`terraform/`. It provisions: default-VPC security groups (web: 80/443 open, 22 locked to
+`admin_cidr`; RDS: 5432 from the web SG only), an EC2 box (Ubuntu 24.04, Elastic IP), RDS
+PostgreSQL (`db.t4g.micro`, encrypted, private, deletion-protected), an S3 media bucket
+(public-read + CORS), an IAM instance role (S3 RW + SES send + SSM), and optional Route 53
++ SES (DKIM). `user_data.sh.tftpl` is the cloud-init bootstrap that runs steps 4–9 of the
+guide (clone repo, venv, `.env`, migrate, collectstatic, gunicorn systemd, frontend build,
+nginx, cron).
+- **Use OpenTofu, not Terraform.** HashiCorp's provider registry is **geo-blocked** in this
+  region ("Content not available in your region"), so `terraform init` fails. OpenTofu
+  (`tofu`, installed via winget `OpenTofu.Tofu`) uses `registry.opentofu.org` and works.
+  Same HCL/state/providers. Binary lives under `~/AppData/Local/Microsoft/WinGet/Packages/`.
+- **One toggle drives everything: `domain_name`.** Empty `""` = **test mode** (raw Elastic
+  IP over HTTP: `DEBUG=True`, non-Secure cookies, `SECURE_SSL_REDIRECT=False`, console email
+  backend, catch-all nginx `server_name`, no certbot/SES — a throwaway box, `DEBUG` exposes
+  tracebacks). A real domain = **prod path** (`DEBUG=False`, Secure cookies, HSTS, certbot
+  TLS, SES SMTP). Derived strings (`allowed_hosts`, `web_origins`, `server_name`,
+  `email_backend`) are computed in `ec2.tf` `locals`; the EIP is allocated **before** the
+  instance (separate `aws_eip` + `aws_eip_association`) so its address can be baked into
+  `ALLOWED_HOSTS`/CSRF/CORS.
+- **Config lives in `terraform/terraform.tfvars`** (gitignored — holds no secrets but is
+  env-specific). `terraform.tfvars.example` is the template. State (`*.tfstate`) contains the
+  generated DB password + `SECRET_KEY` in plaintext → **not** committed; move to an encrypted
+  S3 backend before this is a shared/real env.
+- **Email.** Test mode = `console.EmailBackend` (emails printed to `journalctl -u vivid`, not
+  sent). Prod = `smtp.EmailBackend` → SES (`email-smtp.<region>.amazonaws.com:587`), creds
+  from `ses_smtp_username/password` tfvars. Django auto-switches to SMTP once `EMAIL_HOST_USER`
+  is set; an explicit `EMAIL_BACKEND` always wins (`settings.py`). SES starts **sandboxed** —
+  request production access separately.
+- **Console access without SSH:** the instance role has `AmazonSSMManagedInstanceCore`, so
+  **EC2 → Connect → Session Manager** works with no key and no inbound 22 (SSM agent is
+  preinstalled on the Ubuntu AMI). Prefer this over EC2 Instance Connect (which would need the
+  SG opened to AWS's IP range).
+- **Re-provisioning:** `user_data_replace_on_change = true`, so editing the bootstrap template
+  replaces the instance on the next `tofu apply` (RDS/S3/EIP untouched, EIP address preserved).
+  Pushing only app-code changes needs `tofu apply -replace=aws_instance.web` to re-run the
+  clone/build.
+- **Live test box (throwaway):** `eu-central-1`, `http://35.157.5.65`, bucket
+  `vivid-space-test-f6225b03`, temp superuser `admin@vivid.test` (pw in `terraform/.admin_pw.tmp`,
+  gitignored). Tear down with `tofu destroy` after flipping `deletion_protection = false` on RDS.
+- **What's left for prod** (mostly tfvars flips, since the hardened path is already coded):
+  own a domain → set `domain_name`/`manage_dns`/`manage_ses`; SES production access + a real
+  superuser (delete the temp one); move state to encrypted S3; add CloudWatch alarms; consider
+  IMDSv2 enforcement, a real `vivid-media-prod` bucket, and ElastiCache/Multi-AZ when scaling.
+
 ## Gotchas learned here
+- **Deploy: `collectstatic` needs `STATIC_ROOT`.** `settings.py` sets `STATIC_ROOT`
+  (`BASE_DIR/staticfiles`, env-overridable via `DJANGO_STATIC_ROOT`); without it `manage.py
+  collectstatic` (guide step 6 / bootstrap) raises `ImproperlyConfigured`. nginx serves it via
+  a `location /static/` alias and proxies `/django-admin` to gunicorn.
+- **Deploy: `redis` is a runtime dependency.** It's in `requirements.txt`. Setting `REDIS_URL`
+  switches Django's cache to the Redis backend, which imports the `redis` package — missing it
+  makes **every** API request 500 (`No module named 'redis'`). The bootstrap installs
+  `redis-server` (the daemon) separately.
+- **Deploy: nginx must traverse `/opt/vivid`.** `adduser --home /opt/vivid` creates it `0750`,
+  so nginx's `www-data` gets `13: Permission denied` (→ 500) serving `dist/`. The bootstrap
+  `chmod 755 /opt/vivid` after creating the user.
+- **Deploy: nginx upload cap.** `client_max_body_size 25m` in the server block — the default
+  1 MB otherwise 413s gallery-image uploads before they reach Django.
 - **`backdrop-filter`/`filter`/`transform` create a containing block for `position:fixed` descendants.** The nav header uses `backdrop-filter` when solid, so any `position:fixed` child (e.g. the mobile menu panel) resolves against the header box, not the viewport — render such overlays as **siblings of the header**, not children.
 - Page-level horizontal-overflow guard uses `overflow-x: clip` (not `hidden`) on `html, body` so it doesn't turn the root into a scroll container and break `position: sticky` headers/sidebars.
 - Hero content is gated behind a `siteReady` flag so it doesn't flash the bundled fallback before `/site/` resolves (cache makes returning visits instant; `.finally` preserves the offline fallback).
