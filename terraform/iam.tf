@@ -52,6 +52,14 @@ resource "aws_iam_role_policy" "ses_send" {
   policy = data.aws_iam_policy_document.ses_send.json
 }
 
+# SSM Session Manager — lets you "Connect" to the instance from the AWS console
+# (EC2 → Connect → Session Manager) with no SSH key and no inbound port 22.
+# The SSM agent ships preinstalled on the Ubuntu AMI; this grants it access.
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.ec2.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 resource "aws_iam_instance_profile" "ec2" {
   name = "${var.project_name}-ec2"
   role = aws_iam_role.ec2.name

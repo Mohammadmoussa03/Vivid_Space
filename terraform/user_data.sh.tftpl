@@ -21,6 +21,9 @@ systemctl enable --now redis-server
 ########################################
 id -u vivid_app &>/dev/null || adduser --system --group --home /opt/vivid vivid_app
 mkdir -p /opt/vivid
+# nginx (www-data) must be able to traverse into /opt/vivid to serve dist/;
+# adduser --home creates it 0750, which blocks that. Make it world-traversable.
+chmod 755 /opt/vivid
 if [ ! -d /opt/vivid/app/.git ]; then
   git clone ${repo_url} /opt/vivid/app
 fi
