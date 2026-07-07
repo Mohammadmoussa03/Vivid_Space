@@ -1,0 +1,108 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=Inter:wght@400;500;600;700&family=Manrope:wght@500;600;700&display=swap');
+
+:root {
+  /* Mindspace palette */
+  --ms-bg: #F5F1ED;         /* warm cream — page background */
+  --ms-bg-2: #EDE8E2;       /* light beige — alt sections */
+  --ms-card: #ffffff;
+  --ms-panel: #FAF8F3;      /* modal / raised surface */
+  --ms-ink: #1A1A1A;        /* deep charcoal — text */
+  --ms-muted: #6B6560;
+  --ms-faint: #8A857E;
+  --ms-line: #E5E3E6;
+  --ms-line-2: #F0ECE6;
+  --ms-accent: #9B7EBD;     /* soft purple */
+  --ms-accent-2: #C9A6E0;   /* light lilac (badges, CTAs) */
+  --ms-green: #3B7554;
+  --ms-amber: #8A6D22;
+  --ms-red: #A0503F;
+
+  --font-serif: 'Playfair Display', serif;
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--ms-bg);
+  color: var(--ms-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+/* Never allow the page itself to scroll sideways on small screens.
+   `clip` (not `hidden`) avoids turning the root into a scroll container,
+   which would otherwise break position: sticky headers/sidebars. */
+html, body { overflow-x: clip; max-width: 100%; }
+/* Media and embeds never exceed their container. */
+img, video, iframe, svg { max-width: 100%; }
+/* Touch scrolling for the horizontal-scroll table wrappers on mobile. */
+.adm-scroll, .ms-rail { -webkit-overflow-scrolling: touch; }
+::selection { background: var(--ms-accent); color: #fff; }
+a { color: inherit; }
+button, input, textarea, select { font-family: var(--font-sans); }
+
+/* Animations from the Mindspace design */
+@keyframes ms-dropdown { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes ms-fade { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+/* Gentle drift for the floating hero glass cards */
+@keyframes ms-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-9px); } }
+/* Form entrance + success pop */
+@keyframes ms-rise { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes ms-pop { 0% { opacity: 0; transform: scale(0.5); } 60% { transform: scale(1.12); } 100% { opacity: 1; transform: scale(1); } }
+/* Modal / dialog open: fade + a slight scale up */
+@keyframes ms-modal { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+
+/* Hero: at least a full viewport (svh accounts for mobile browser chrome),
+   but grows to fit stacked content on small screens so nothing overflows and
+   the background image always covers the whole section top-to-bottom. */
+.ms-hero {
+  min-height: max(620px, 100vh);
+  min-height: max(620px, 100svh);
+  padding-block: clamp(96px, 14vh, 128px);
+}
+
+/* Slow zoom-in-frame for images/tiles on hover (parent clips via overflow) */
+.ms-zoom { overflow: hidden; }
+.ms-zoom img, .ms-zoom .ms-zoom-inner {
+  transition: transform 600ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+.ms-zoom:hover img, .ms-zoom:hover .ms-zoom-inner { transform: scale(1.04); }
+
+/* Subtle row hover for admin tables */
+.adm-row { transition: background 160ms ease-out; }
+.adm-row:hover { background: rgba(155, 126, 189, 0.05); }
+
+/* Premium form fields */
+.ms-input {
+  transition: border-color 200ms ease-out, box-shadow 220ms ease-out, background 200ms ease-out;
+}
+.ms-input::placeholder { color: #B4AEA6; }
+.ms-input:hover { border-color: #D8D2CA; }
+.ms-input:focus {
+  border-color: #9B7EBD !important;
+  box-shadow: 0 0 0 4px rgba(155, 126, 189, 0.18);
+  background: #fff;
+}
+/* Primary submit button */
+.ms-submit {
+  transition: transform 220ms cubic-bezier(.22,.61,.36,1), box-shadow 220ms cubic-bezier(.22,.61,.36,1), filter 220ms ease-out;
+}
+.ms-submit:hover { transform: translateY(-2px); box-shadow: 0 16px 34px -12px rgba(155,126,189,0.6); filter: brightness(1.04); }
+.ms-submit:active { transform: translateY(0) scale(0.985); }
+.ms-ghost { transition: border-color 200ms ease-out, background 200ms ease-out; }
+.ms-ghost:hover { border-color: rgba(26,26,26,0.4); background: rgba(26,26,26,0.02); }
+
+/* Hide scrollbars on horizontal chip rails */
+.ms-rail::-webkit-scrollbar { display: none; }
+.ms-rail { scrollbar-width: none; }
+
+/* Custom scrollbar for admin surfaces */
+.adm-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+.adm-scroll::-webkit-scrollbar-thumb { background: #DED8D0; border-radius: 9999px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}

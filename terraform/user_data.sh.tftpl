@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Cloud-init bootstrap for Vivid Space (AWS_DEPLOY.md — Option A).
+# Mirrors steps 4–9 of the guide. Logs to /var/log/vivid-bootstrap.log.
+set -euxo pipefail
+exec > >(tee -a /var/log/vivid-bootstrap.log) 2>&1
+
+export DEBIAN_FRONTEND=noninteractive
+
+########################################
+# 4. System packages
+########################################
+apt-get update && apt-get upgrade -y
+apt-get install -y python3-venv python3-pip redis-server git nginx \
+  certbot python3-certbot-nginx postgresql-client curl
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt-get install -y nodejs
+systemctl enable --now redis-server
+
+########################################
+# 5. App user, code, venv
+########################################
+id -u vivid_app &>/dev/null || adduser --system --group --home /opt/vivid vivid_app
+mkdir -p /opt/vivid
+if [ ! -d /opt/vivid/app/.git ]; then
+  git clone ${repo_url} /opt/vivid/app
+fi
+cd /opt/vivid/app/backend
+python3 -m venv venv
+./venv/bin/pip install --upgrade pip
+./venv/bin/pip install -r requirements.txt gunicorn
+
+########################################
+# .env  (secrets injected by Terraform; S3/SES creds come from the instance role)
+########################################
+cat > /opt/vivid/app/backend/.env <<'ENVEOF'
+DEBUG=False
+SECRET_KEY=${secret_key}
+DJANGO_ALLOWED_HOSTS=${domain_name},www.${domain_name}
+CSRF_TRUSTED_ORIGINS=https://${domain_name},https://www.${domain_name}
+CORS_ALLOWED_ORIGINS=https://${domain_name},https://www.${domain_name}
+FRONTEND_URL=https://${domain_name}
+
+POSTGRES_DB=${db_name}
+POSTGRES_USER=${db_user}
+POSTGRES_PASSWORD=${db_password}
+POSTGRES_HOST=${db_host}
+POSTGRES_PORT=5432
+
+REDIS_URL=redis://127.0.0.1:6379/1
+
+AWS_STORAGE_BUCKET_NAME=${media_bucket}
+AWS_S3_REGION_NAME=${aws_region}
+
+EMAIL_HOST=${email_host}
+EMAIL_PORT=587
+EMAIL_USE_TLS=True
+EMAIL_HOST_USER=${ses_smtp_username}
+EMAIL_HOST_PASSWORD=${ses_smtp_password}
+DEFAULT_FROM_EMAIL=${default_from_email}
+ENVEOF
+chown vivid_app:vivid_app /opt/vivid/app/backend/.env
+chmod 600 /opt/vivid/app/backend/.env
+
+########################################
+# 6. Migrate, static
+########################################
+cd /opt/vivid/app/backend
+./venv/bin/python manage.py migrate --noinput
+./venv/bin/python manage.py collectstatic --noinput
+chown -R vivid_app:vivid_app /opt/vivid
+
+########################################
+# 7. gunicorn systemd service
+########################################
+cat > /etc/systemd/system/vivid.service <<'SVCEOF'
+[Unit]
+Description=Vivid Space (gunicorn)
+After=network.target redis-server.service
+
+[Service]
+User=vivid_app
+Group=vivid_app
+WorkingDirectory=/opt/vivid/app/backend
+EnvironmentFile=/opt/vivid/app/backend/.env
+ExecStart=/opt/vivid/app/backend/venv/bin/gunicorn config.wsgi:application --bind 127.0.0.1:8001 --workers 3 --timeout 60
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+systemctl daemon-reload
+systemctl enable --now vivid
+
+########################################
+# 8. Frontend build + nginx
+########################################
+cd /opt/vivid/app/frontend
+npm ci
+npm run build
+chown -R vivid_app:vivid_app /opt/vivid/app/frontend/dist
+
+cat > /etc/nginx/sites-available/vivid <<'NGXEOF'
+server {
+    listen 80;
+    server_name ${domain_name} www.${domain_name};
+    root /opt/vivid/app/frontend/dist;
+
+    location /api {
+        proxy_pass http://127.0.0.1:8001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+    location / { try_files $uri /index.html; }
+}
+NGXEOF
+ln -sf /etc/nginx/sites-available/vivid /etc/nginx/sites-enabled/vivid
+rm -f /etc/nginx/sites-enabled/default
+nginx -t && systemctl reload nginx
+
+# TLS — best effort; only succeeds once DNS resolves to this box.
+if [ -n "${certbot_email}" ]; then
+  certbot --nginx --non-interactive --agree-tos -m ${certbot_email} \
+    -d ${domain_name} -d www.${domain_name} --redirect || \
+    echo "certbot failed (DNS not pointing here yet?) — rerun manually once DNS is live."
+fi
+
+########################################
+# 9. Cron — monthly free-hours reset
+########################################
+cat > /etc/cron.d/vivid-hours <<'CRONEOF'
+5 0 1 * * vivid_app cd /opt/vivid/app/backend && ./venv/bin/python manage.py reset_monthly_hours
+CRONEOF
+chmod 644 /etc/cron.d/vivid-hours
+
+echo "Vivid Space bootstrap complete."
