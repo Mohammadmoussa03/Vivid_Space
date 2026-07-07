@@ -25,8 +25,9 @@ variable "project_name" {
 ########################################
 
 variable "domain_name" {
-  description = "Apex domain, e.g. example.com. Used for ALLOWED_HOSTS, TLS, SES, and Route 53 records."
+  description = "Apex domain, e.g. example.com. Leave \"\" for a no-domain HTTP test on the raw Elastic IP (test mode: DEBUG=True, no TLS/SES)."
   type        = string
+  default     = ""
 }
 
 variable "manage_dns" {

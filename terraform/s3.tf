@@ -46,7 +46,9 @@ resource "aws_s3_bucket_cors_configuration" "media" {
   bucket = aws_s3_bucket.media.id
 
   cors_rule {
-    allowed_origins = ["https://${var.domain_name}", "https://www.${var.domain_name}"]
+    # Public, GET-only media bucket. In test mode (no domain) we allow any origin;
+    # with a domain, restrict to the real site origins.
+    allowed_origins = local.test_mode ? ["*"] : ["https://${var.domain_name}", "https://www.${var.domain_name}"]
     allowed_methods = ["GET"]
     allowed_headers = ["*"]
     max_age_seconds = 3000

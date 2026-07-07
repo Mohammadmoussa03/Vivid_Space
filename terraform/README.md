@@ -28,6 +28,15 @@ collects static, builds the frontend, and wires up the gunicorn service, nginx, 
 | `route53.tf` | A records apex + www → EIP (when `manage_dns = true`) |
 | `ses.tf` | SES domain identity + DKIM (when `manage_ses = true`) |
 
+## No-domain test mode
+Set `domain_name = ""` to stand the stack up for a quick smoke test on the raw Elastic
+IP over **HTTP** — no domain, TLS, SES, or Route 53 required. In this mode the bootstrap
+writes `DEBUG=True`, non-Secure cookies, and `SECURE_SSL_REDIRECT=False` so login works
+over plain HTTP, points email at the console backend, and serves nginx on port 80 with a
+catch-all `server_name`. **It is a throwaway box** (DEBUG exposes tracebacks) — use it to
+verify the stack, then `terraform destroy` and redeploy with a real `domain_name` for
+launch. Setting a non-empty `domain_name` flips everything back to the hardened prod path.
+
 ## Usage
 ```bash
 cd terraform

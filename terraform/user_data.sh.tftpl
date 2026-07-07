@@ -33,12 +33,13 @@ python3 -m venv venv
 # .env  (secrets injected by Terraform; S3/SES creds come from the instance role)
 ########################################
 cat > /opt/vivid/app/backend/.env <<'ENVEOF'
-DEBUG=False
-SECRET_KEY=${secret_key}
-DJANGO_ALLOWED_HOSTS=${domain_name},www.${domain_name}
-CSRF_TRUSTED_ORIGINS=https://${domain_name},https://www.${domain_name}
-CORS_ALLOWED_ORIGINS=https://${domain_name},https://www.${domain_name}
-FRONTEND_URL=https://${domain_name}
+DJANGO_DEBUG=${django_debug}
+DJANGO_SECRET_KEY=${secret_key}
+DJANGO_ALLOWED_HOSTS=${allowed_hosts}
+CSRF_TRUSTED_ORIGINS=${web_origins}
+CORS_ALLOWED_ORIGINS=${web_origins}
+FRONTEND_URL=${frontend_url}
+SECURE_SSL_REDIRECT=False
 
 POSTGRES_DB=${db_name}
 POSTGRES_USER=${db_user}
@@ -51,6 +52,7 @@ REDIS_URL=redis://127.0.0.1:6379/1
 AWS_STORAGE_BUCKET_NAME=${media_bucket}
 AWS_S3_REGION_NAME=${aws_region}
 
+EMAIL_BACKEND=${email_backend}
 EMAIL_HOST=${email_host}
 EMAIL_PORT=587
 EMAIL_USE_TLS=True
@@ -102,7 +104,7 @@ chown -R vivid_app:vivid_app /opt/vivid/app/frontend/dist
 cat > /etc/nginx/sites-available/vivid <<'NGXEOF'
 server {
     listen 80;
-    server_name ${domain_name} www.${domain_name};
+    server_name ${server_name};
     root /opt/vivid/app/frontend/dist;
 
     location /api {
