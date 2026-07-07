@@ -138,6 +138,9 @@ USE_TZ = True
 
 # Static files
 STATIC_URL = 'static/'
+# collectstatic target (Django admin assets etc.). Served by nginx in production;
+# harmless in dev. Overridable via env for hosts that need a different path.
+STATIC_ROOT = env('DJANGO_STATIC_ROOT', str(BASE_DIR / 'staticfiles'))
 
 # Uploaded media (gallery images).
 MEDIA_URL = '/media/'
