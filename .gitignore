@@ -32,3 +32,6 @@ terraform/.terraform.lock.hcl
 .DS_Store
 .idea/
 .vscode/
+
+# temp admin password (local only)
+.admin_pw.tmp

@@ -109,6 +109,7 @@ server {
     listen 80;
     server_name ${server_name};
     root /opt/vivid/app/frontend/dist;
+    client_max_body_size 25m;   # allow gallery image uploads (nginx default is 1m)
 
     location /api {
         proxy_pass http://127.0.0.1:8001;
