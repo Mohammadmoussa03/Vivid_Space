@@ -272,7 +272,7 @@ export default function Landing() {
           boxShadow: navSolid ? '0 10px 30px -18px rgba(20,18,16,0.30)' : '0 0 0 rgba(0,0,0,0)',
           transition: 'background 300ms ease-out, backdrop-filter 300ms ease-out, border-color 300ms ease-out, box-shadow 300ms ease-out' }}
       >
-        <div style={{ maxWidth: 1600, margin: '0 auto', height: 84, padding: '0 clamp(20px,4vw,48px)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ position: 'relative', maxWidth: 1600, margin: '0 auto', height: 84, padding: '0 clamp(20px,4vw,48px)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <a href="#top" onMouseEnter={() => setOpenMenu(null)} onClick={(e) => { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
             aria-label="VividSpace — home" style={{ display: 'flex', alignItems: 'center', textDecoration: 'none' }}>
             {/* Colour logo on the solid cream bar; white logo over the dark hero — crossfaded. */}
@@ -284,7 +284,7 @@ export default function Landing() {
 
           {showDesktopNav ? (
             <>
-              <nav style={{ display: 'flex', alignItems: 'center', gap: 64 }}>
+              <nav style={{ position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%,-50%)', display: 'flex', alignItems: 'center', gap: 64 }}>
                 {NAV_MENUS.map((m) => (
                   <NavItem key={m.key} menu={m} active={openMenu === m.key} onEnter={() => setOpenMenu(m.key)}
                     onSelect={m.key === 'solutions' ? scrollToPackages : undefined} solid={navSolid} />

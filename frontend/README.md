@@ -1,3 +1,4 @@
+
 # Mindspace — Frontend
 
 React + Vite single-page app implementing the **Mindspace** design (imported from
