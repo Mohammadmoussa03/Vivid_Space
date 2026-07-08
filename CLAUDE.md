@@ -125,6 +125,21 @@ nginx, cron).
   `chmod 755 /opt/vivid` after creating the user.
 - **Deploy: nginx upload cap.** `client_max_body_size 25m` in the server block — the default
   1 MB otherwise 413s gallery-image uploads before they reach Django.
+- **Deploy: use `deploy.sh` for app-code updates.** `deploy.sh` (repo root) does the full
+  update in order — pull → `pip install` → `migrate` → `collectstatic` → frontend `npm ci &&
+  build` → restart gunicorn → reload nginx → health-check — and aborts loudly (`set -euo
+  pipefail`) instead of masking a failed step. Run it on the box as root:
+  `sudo bash /opt/vivid/app/deploy.sh` (paths overridable via `APP_DIR`/`APP_USER`/`SERVICE`/
+  `BRANCH`). The layout it targets: repo at **`/opt/vivid/app`**, service user **`vivid_app`**,
+  venv `backend/venv`, systemd unit **`vivid`** (gunicorn on `127.0.0.1:8001`).
+- **Deploy: the frontend tree must be owned by `vivid_app`.** The cloud-init bootstrap runs
+  `npm ci` as root, so `frontend/node_modules` ends up root-owned; a later `vite build` run as
+  `vivid_app` then dies with `EACCES` writing `node_modules/.vite-temp/…` and the frontend
+  **silently stays stale** (backend deploys fine, so it's easy to miss). `deploy.sh` fixes this
+  by `chown -R vivid_app:vivid_app frontend` before building. Also: never pipe the build to
+  `tail`/`head` in a `set -e` script — the pipe's exit status hides a build failure.
+- **`*.sh` files are pinned to LF via `.gitattributes`** (repo has `autocrlf=true`); a CRLF
+  shebang would be a "bad interpreter" error on the Linux box.
 - **`backdrop-filter`/`filter`/`transform` create a containing block for `position:fixed` descendants.** The nav header uses `backdrop-filter` when solid, so any `position:fixed` child (e.g. the mobile menu panel) resolves against the header box, not the viewport — render such overlays as **siblings of the header**, not children.
 - Page-level horizontal-overflow guard uses `overflow-x: clip` (not `hidden`) on `html, body` so it doesn't turn the root into a scroll container and break `position: sticky` headers/sidebars.
 - Hero content is gated behind a `siteReady` flag so it doesn't flash the bundled fallback before `/site/` resolves (cache makes returning visits instant; `.finally` preserves the offline fallback).
