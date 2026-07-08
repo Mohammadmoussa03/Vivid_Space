@@ -10,6 +10,7 @@ from .views import (
     GalleryListView,
     OverviewView,
     PackageViewSet,
+    ScheduleChangeView,
     SiteConfigView,
     SpaceViewSet,
     TourRequestCreateView,
@@ -26,6 +27,7 @@ router.register('tours', TourRequestCreateView, basename='tour')
 
 urlpatterns = [
     path('overview/', OverviewView.as_view(), name='overview'),
+    path('schedule-change/', ScheduleChangeView.as_view(), name='schedule-change'),
     path('customize/', CustomizationRequestView.as_view(), name='customize'),
     path('availability/', AvailabilityView.as_view(), name='availability'),
     path('site/', SiteConfigView.as_view(), name='site-config'),

@@ -21,7 +21,13 @@ from bookings.models import (
     Membership, MembershipPlan, PackageCategory, PromoCode, SiteContent, Space,
     TourRequest,
 )
-from bookings.serializers import FAQSerializer, GalleryImageSerializer, MONTHS
+from bookings.serializers import (
+    BookingCreateSerializer, FAQSerializer, GalleryImageSerializer, MONTHS,
+)
+from bookings.views import (
+    _booking_length_hours, _send_change_result, _send_schedule_change_result,
+    _slot_end_time,
+)
 
 from .serializers import (
     AdminPackageCategorySerializer,
@@ -177,6 +183,8 @@ class AdminUserViewSet(viewsets.ModelViewSet):
                 'price_display': membership.price_display,
                 'is_custom': membership.is_custom,
                 'member_since': membership.member_since,
+                'schedule_change_requested': membership.schedule_change_requested,
+                'pending_components': membership.pending_components,
             },
         }
 
@@ -260,6 +268,36 @@ class AdminUserViewSet(viewsets.ModelViewSet):
         return Response(self._membership_detail(user, membership),
                         status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post'], url_path='approve-schedule-change')
+    def approve_schedule_change(self, request, pk=None):
+        """Apply a member's proposed package schedule to their membership."""
+        user = self.get_object()
+        ms = Membership.objects.filter(user=user).select_related('plan').first()
+        if not ms or not ms.has_schedule_change:
+            return Response({'detail': 'This member has no pending schedule change.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        ms.custom_components = ms.pending_components or []
+        ms.pending_components = None
+        ms.schedule_change_requested = False
+        ms.save(update_fields=['custom_components', 'pending_components',
+                               'schedule_change_requested'])
+        _send_schedule_change_result(ms, approved=True)
+        return Response(self._membership_detail(user, ms))
+
+    @action(detail=True, methods=['post'], url_path='reject-schedule-change')
+    def reject_schedule_change(self, request, pk=None):
+        """Discard a member's proposed package schedule; membership is unchanged."""
+        user = self.get_object()
+        ms = Membership.objects.filter(user=user).select_related('plan').first()
+        if not ms or not ms.has_schedule_change:
+            return Response({'detail': 'This member has no pending schedule change.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        ms.pending_components = None
+        ms.schedule_change_requested = False
+        ms.save(update_fields=['pending_components', 'schedule_change_requested'])
+        _send_schedule_change_result(ms, approved=False)
+        return Response(self._membership_detail(user, ms))
+
 
 class AdminClientViewSet(viewsets.ReadOnlyModelViewSet):
     """Active clients (approved members) for the Clients table."""
@@ -286,6 +324,8 @@ class AdminReservationViewSet(viewsets.ModelViewSet):
         today = date.today()
         if f == 'pending':
             qs = qs.filter(is_pending=True, status=Booking.Status.CONFIRMED)
+        elif f == 'change':
+            qs = qs.filter(change_requested=True, status=Booking.Status.CONFIRMED)
         elif f == 'confirmed':
             qs = qs.filter(is_pending=False, status=Booking.Status.CONFIRMED, date__gte=today)
         elif f == 'cancelled':
@@ -324,6 +364,61 @@ class AdminReservationViewSet(viewsets.ModelViewSet):
         booking = self.get_object()
         booking.is_paid = not booking.is_paid
         booking.save(update_fields=['is_paid'])
+        return Response(ReservationSerializer(booking).data)
+
+    @action(detail=True, methods=['post'], url_path='approve-change')
+    def approve_change(self, request, pk=None):
+        """Apply a member's pending reschedule to the booking. Re-checks
+        availability at approval time in case the new slot was taken meanwhile."""
+        booking = self.get_object()
+        if not booking.change_requested or not booking.requested_date:
+            return Response({'detail': 'This booking has no pending change request.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        new_date = booking.requested_date
+        start = end = None
+        if booking.duration == Booking.Duration.HOURLY:
+            start = booking.requested_start_time
+            end = _slot_end_time(new_date, start, _booking_length_hours(booking))
+
+        conflict = BookingCreateSerializer._overlap_conflict(
+            booking.space, new_date, booking.unit, start, end, exclude_pk=booking.pk,
+        )
+        if conflict:
+            return Response({'detail': f'Can\'t approve — {conflict}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        blocked = BookingCreateSerializer._blocked(booking.space, new_date, start, end)
+        if blocked:
+            return Response({'detail': f'Can\'t approve — {blocked}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        booking.date = new_date
+        booking.start_time = start
+        booking.end_time = end
+        booking.change_requested = False
+        booking.requested_date = None
+        booking.requested_start_time = None
+        booking.save(update_fields=[
+            'date', 'start_time', 'end_time',
+            'change_requested', 'requested_date', 'requested_start_time',
+        ])
+        _send_change_result(booking, approved=True)
+        return Response(ReservationSerializer(booking).data)
+
+    @action(detail=True, methods=['post'], url_path='reject-change')
+    def reject_change(self, request, pk=None):
+        """Discard a member's pending reschedule; the booking is left unchanged."""
+        booking = self.get_object()
+        if not booking.change_requested:
+            return Response({'detail': 'This booking has no pending change request.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        booking.change_requested = False
+        booking.requested_date = None
+        booking.requested_start_time = None
+        booking.save(update_fields=[
+            'change_requested', 'requested_date', 'requested_start_time',
+        ])
+        _send_change_result(booking, approved=False)
         return Response(ReservationSerializer(booking).data)
 
 

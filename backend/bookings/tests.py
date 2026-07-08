@@ -3,11 +3,11 @@ from datetime import date, time, timedelta
 from django.contrib.auth import get_user_model
 from django.core import mail
 from django.utils import timezone
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
 
 from .models import (
-    BlockedSlot, Booking, FAQ, GalleryImage, Membership, MembershipPlan,
-    PackageCategory, PromoCode, Space,
+    BlockedSlot, Booking, CustomizationRequest, FAQ, GalleryImage, Membership,
+    MembershipPlan, PackageCategory, PromoCode, Space,
 )
 
 User = get_user_model()
@@ -117,6 +117,153 @@ class BookingExperienceTests(BookingTestBase):
         owner_mail = next(m for m in mail.outbox if m.to != ['m@example.com'])
         self.assertIn('confirmed', client_mail.subject.lower())
         self.assertIn('New booking', owner_mail.subject)
+
+
+class ChangeRequestTests(BookingTestBase):
+    """Member reschedule request → admin approve / reject flow."""
+
+    def setUp(self):
+        super().setUp()
+        self.admin = User.objects.create_user(
+            email='a@example.com', password='pw12345678', is_approved=True,
+            role=User.Role.ADMIN,
+        )
+        self.admin_client = APIClient()
+        self.admin_client.force_authenticate(self.admin)
+        self.day_after = self.tomorrow + timedelta(days=1)
+        # A confirmed hourly booking (tomorrow 10:00–11:00) to reschedule.
+        resp = self.book(hours=1)
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.booking_id = resp.data['id']
+
+    def request_change(self, **kw):
+        payload = {'date': self.day_after.isoformat(), 'start_time': '14:00'}
+        payload.update(kw)
+        return self.client.post(f'/api/bookings/{self.booking_id}/request-change/', payload)
+
+    def approve(self):
+        return self.admin_client.post(f'/api/admin/reservations/{self.booking_id}/approve-change/')
+
+    def reject(self):
+        return self.admin_client.post(f'/api/admin/reservations/{self.booking_id}/reject-change/')
+
+    # ---- request ----
+
+    def test_request_locks_booking_and_emails_owner(self):
+        mail.outbox = []
+        resp = self.request_change()
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(resp.data['change_requested'])
+        self.assertEqual(resp.data['requested']['time'], '14:00')
+        b = Booking.objects.get(pk=self.booking_id)
+        self.assertTrue(b.change_requested)
+        self.assertEqual(b.requested_date, self.day_after)
+        self.assertEqual(b.requested_start_time, time(14, 0))
+        # Original booking is untouched until the admin decides.
+        self.assertEqual(b.date, self.tomorrow)
+        self.assertEqual(b.start_time, time(10, 0))
+        # Owner is notified (single email, not to the member).
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertNotIn('m@example.com', mail.outbox[0].to)
+        self.assertIn('change request', mail.outbox[0].subject.lower())
+
+    def test_locked_booking_cannot_be_cancelled(self):
+        self.request_change()
+        resp = self.client.post(f'/api/bookings/{self.booking_id}/cancel/')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('awaiting review', str(resp.data))
+        self.assertFalse(Booking.objects.get(pk=self.booking_id).is_cancelled)
+
+    def test_cannot_request_change_twice(self):
+        self.assertEqual(self.request_change().status_code, 200)
+        resp = self.request_change(start_time='15:00')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('already', str(resp.data).lower())
+
+    def test_request_rejects_past_date(self):
+        resp = self.request_change(date=(date.today() - timedelta(days=1)).isoformat())
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Booking.objects.get(pk=self.booking_id).change_requested)
+
+    def test_request_rejects_blocked_slot(self):
+        BlockedSlot.objects.create(
+            space=self.meeting, date=self.day_after,
+            start_time=time(13, 0), end_time=time(15, 0), reason='Maintenance',
+        )
+        resp = self.request_change()
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Maintenance', str(resp.data))
+        self.assertFalse(Booking.objects.get(pk=self.booking_id).change_requested)
+
+    def test_other_member_cannot_request_change(self):
+        other = User.objects.create_user(
+            email='o@example.com', password='pw12345678', is_approved=True,
+        )
+        other_client = APIClient()
+        other_client.force_authenticate(other)
+        resp = other_client.post(
+            f'/api/bookings/{self.booking_id}/request-change/',
+            {'date': self.day_after.isoformat(), 'start_time': '14:00'},
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    # ---- admin decision ----
+
+    def test_admin_approve_applies_change_and_emails_member(self):
+        self.request_change()
+        mail.outbox = []
+        resp = self.approve()
+        self.assertEqual(resp.status_code, 200, resp.data)
+        b = Booking.objects.get(pk=self.booking_id)
+        self.assertEqual(b.date, self.day_after)
+        self.assertEqual(b.start_time, time(14, 0))
+        self.assertEqual(b.end_time, time(15, 0))       # 1hr length preserved
+        self.assertFalse(b.change_requested)
+        self.assertIsNone(b.requested_date)
+        self.assertIsNone(b.requested_start_time)
+        self.assertEqual(mail.outbox[-1].to, ['m@example.com'])
+        self.assertIn('rescheduled', mail.outbox[-1].subject.lower())
+
+    def test_admin_reject_keeps_original_and_emails_member(self):
+        self.request_change()
+        mail.outbox = []
+        resp = self.reject()
+        self.assertEqual(resp.status_code, 200, resp.data)
+        b = Booking.objects.get(pk=self.booking_id)
+        self.assertEqual(b.date, self.tomorrow)         # unchanged
+        self.assertEqual(b.start_time, time(10, 0))
+        self.assertFalse(b.change_requested)
+        self.assertIsNone(b.requested_date)
+        self.assertEqual(mail.outbox[-1].to, ['m@example.com'])
+        self.assertIn('declined', mail.outbox[-1].subject.lower())
+
+    def test_approve_revalidates_availability(self):
+        self.request_change()
+        # The requested slot gets blocked after the request but before approval.
+        BlockedSlot.objects.create(
+            space=self.meeting, date=self.day_after,
+            start_time=time(13, 0), end_time=time(15, 0), reason='Maintenance',
+        )
+        resp = self.approve()
+        self.assertEqual(resp.status_code, 400)
+        b = Booking.objects.get(pk=self.booking_id)
+        # Still locked and unchanged so the admin can retry / reject.
+        self.assertTrue(b.change_requested)
+        self.assertEqual(b.date, self.tomorrow)
+
+    def test_change_filter_lists_request(self):
+        self.request_change()
+        resp = self.admin_client.get('/api/admin/reservations/?filter=change')
+        self.assertEqual(resp.status_code, 200)
+        row = next(r for r in resp.data if r['id'] == self.booking_id)
+        self.assertTrue(row['change_requested'])
+        self.assertEqual(row['status'], 'change')
+        self.assertIn('14:00', row['requested_label'])
+
+    def test_approve_without_request_is_rejected(self):
+        resp = self.approve()
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('no pending change', str(resp.data).lower())
 
 
 class SpaceAvailabilityTests(APITestCase):
@@ -231,3 +378,219 @@ class AdminManagementTests(APITestCase):
         cat = self.client.post('/api/admin/categories/', {'name': 'Studios'})
         self.assertEqual(cat.status_code, 201)
         self.assertEqual(cat.data['slug'], 'studios')  # auto-slugged
+
+
+class CustomizationRequestTests(APITestCase):
+    """Public 'build your own package' enquiry, incl. per-office time of day."""
+
+    def setUp(self):
+        self.tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        self.day2 = (date.today() + timedelta(days=2)).isoformat()
+
+    def submit(self, items):
+        return self.client.post('/api/customize/', {
+            'name': 'Jane Doe', 'email': 'jane@example.com', 'phone': '+123',
+            'items': items,
+        }, format='json')
+
+    def test_persists_fullday_and_hourly_timing(self):
+        mail.outbox = []
+        resp = self.submit([
+            {'office': 'Private Office', 'dates': [self.tomorrow, self.day2]},  # defaults to full day
+            {'office': 'Meeting Room', 'dates': [self.tomorrow],
+             'duration': 'hourly', 'start_time': '14:00', 'hours': 2},
+        ])
+        self.assertEqual(resp.status_code, 201, resp.data)
+        cr = CustomizationRequest.objects.get(email='jane@example.com')
+        office = next(i for i in cr.items if i['office'] == 'Private Office')
+        room = next(i for i in cr.items if i['office'] == 'Meeting Room')
+        self.assertEqual(office['duration'], 'fullday')
+        self.assertEqual(room['duration'], 'hourly')
+        self.assertEqual(room['start_time'], '14:00')
+        self.assertEqual(room['hours'], 2)
+        # Owner email carries the timing.
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn('14:00', mail.outbox[0].body)
+        self.assertIn('Full day', mail.outbox[0].body)
+
+    def test_hourly_requires_start_time(self):
+        resp = self.submit([
+            {'office': 'Meeting Room', 'dates': [self.tomorrow], 'duration': 'hourly'},
+        ])
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('start time', str(resp.data).lower())
+
+    def test_rejects_out_of_range_hours(self):
+        resp = self.submit([
+            {'office': 'Meeting Room', 'dates': [self.tomorrow],
+             'duration': 'hourly', 'start_time': '09:00', 'hours': 20},
+        ])
+        self.assertEqual(resp.status_code, 400)
+
+
+class ScheduleChangeTests(APITestCase):
+    """Member proposes a package-schedule edit → admin approve / reject flow."""
+
+    def setUp(self):
+        self.plan = MembershipPlan.objects.create(name='Office', room_hours=5, price=100)
+        self.member = User.objects.create_user(
+            email='m@example.com', password='pw12345678', is_approved=True,
+        )
+        self.tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        self.day2 = (date.today() + timedelta(days=2)).isoformat()
+        # A bespoke membership: one dated package, one editable-but-empty package,
+        # and one fixed lifetime package.
+        self.membership = Membership.objects.create(
+            user=self.member, plan=self.plan, custom_plan_name='Bespoke',
+            hours_period=timezone.localdate().strftime('%Y-%m'),
+            custom_components=[
+                {'name': 'Private Office', 'plan': self.plan.id, 'dates': [self.tomorrow]},
+                {'name': 'Desk', 'plan': self.plan.id, 'dates': []},
+                {'name': 'Lounge', 'lifetime': True, 'dates': []},
+            ],
+        )
+        self.admin = User.objects.create_user(
+            email='a@example.com', password='pw12345678', is_approved=True,
+            role=User.Role.ADMIN,
+        )
+        self.member_client = APIClient()
+        self.member_client.force_authenticate(self.member)
+        self.admin_client = APIClient()
+        self.admin_client.force_authenticate(self.admin)
+
+    def request_change(self, components):
+        return self.member_client.post(
+            '/api/schedule-change/', {'components': components}, format='json')
+
+    def approve(self):
+        return self.admin_client.post(
+            f'/api/admin/users/{self.member.id}/approve-schedule-change/')
+
+    def reject(self):
+        return self.admin_client.post(
+            f'/api/admin/users/{self.member.id}/reject-schedule-change/')
+
+    @staticmethod
+    def _comp(components, name):
+        return next((c for c in components if c.get('name') == name), None)
+
+    # ---- request ----
+
+    def test_request_stores_pending_and_emails_owner(self):
+        mail.outbox = []
+        resp = self.request_change([{'name': 'Private Office', 'dates': [self.tomorrow, self.day2]}])
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(resp.data['schedule_change_requested'])
+        self.membership.refresh_from_db()
+        self.assertTrue(self.membership.schedule_change_requested)
+        # Live schedule is untouched until approval (Private Office still 1 day).
+        self.assertEqual(self._comp(self.membership.custom_components, 'Private Office')['dates'],
+                         [self.tomorrow])
+        # Proposal captures the new days and preserves the fixed lifetime package.
+        pending = self.membership.pending_components
+        self.assertEqual(self._comp(pending, 'Private Office')['dates'], [self.tomorrow, self.day2])
+        self.assertTrue(self._comp(pending, 'Lounge')['lifetime'])
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertNotIn('m@example.com', mail.outbox[0].to)
+        self.assertIn('schedule change', mail.outbox[0].subject.lower())
+
+    def test_cannot_request_twice(self):
+        self.assertEqual(self.request_change([{'name': 'Private Office', 'dates': [self.tomorrow]}]).status_code, 200)
+        resp = self.request_change([{'name': 'Private Office', 'dates': [self.day2]}])
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('already', str(resp.data).lower())
+
+    def test_rejects_unknown_package(self):
+        resp = self.request_change([{'name': 'Penthouse', 'dates': [self.tomorrow]}])
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('part of your package', str(resp.data))
+        self.membership.refresh_from_db()
+        self.assertFalse(self.membership.schedule_change_requested)
+
+    def test_rejects_new_past_date(self):
+        past = (date.today() - timedelta(days=1)).isoformat()
+        resp = self.request_change([{'name': 'Private Office', 'dates': [past]}])
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('past', str(resp.data).lower())
+
+    def test_carryover_past_dates_allowed(self):
+        # A day already in the member's schedule that has since fallen into the
+        # past must carry through untouched — not block the whole submission.
+        past = (date.today() - timedelta(days=3)).isoformat()
+        self.membership.custom_components[0]['dates'] = [past, self.tomorrow]
+        self.membership.save()
+        resp = self.request_change([{'name': 'Private Office', 'dates': [past, self.tomorrow, self.day2]}])
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.membership.refresh_from_db()
+        kept = self._comp(self.membership.pending_components, 'Private Office')['dates']
+        self.assertIn(past, kept)          # history preserved
+        self.assertIn(self.day2, kept)     # new future day added
+
+    def test_rejects_same_day_two_packages(self):
+        resp = self.request_change([
+            {'name': 'Private Office', 'dates': [self.tomorrow]},
+            {'name': 'Desk', 'dates': [self.tomorrow]},
+        ])
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('only one package', str(resp.data))
+
+    def test_no_editable_schedule(self):
+        plain = User.objects.create_user(
+            email='p@example.com', password='pw12345678', is_approved=True)
+        Membership.objects.create(user=plain, plan=self.plan, custom_components=[])
+        c = APIClient()
+        c.force_authenticate(plain)
+        resp = c.post('/api/schedule-change/', {'components': []}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('no editable schedule', str(resp.data).lower())
+
+    def test_requires_membership(self):
+        nomem = User.objects.create_user(
+            email='n@example.com', password='pw12345678', is_approved=True)
+        c = APIClient()
+        c.force_authenticate(nomem)
+        resp = c.post('/api/schedule-change/', {'components': []}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('membership', str(resp.data).lower())
+
+    # ---- admin decision ----
+
+    def test_admin_approve_applies_and_emails_member(self):
+        self.request_change([{'name': 'Private Office', 'dates': [self.tomorrow, self.day2]}])
+        mail.outbox = []
+        resp = self.approve()
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.membership.refresh_from_db()
+        self.assertFalse(self.membership.schedule_change_requested)
+        self.assertIsNone(self.membership.pending_components)
+        self.assertEqual(self._comp(self.membership.custom_components, 'Private Office')['dates'],
+                         [self.tomorrow, self.day2])
+        self.assertTrue(self._comp(self.membership.custom_components, 'Lounge')['lifetime'])
+        self.assertEqual(mail.outbox[-1].to, ['m@example.com'])
+        self.assertIn('schedule', mail.outbox[-1].subject.lower())
+
+    def test_admin_reject_keeps_original_and_emails_member(self):
+        self.request_change([{'name': 'Private Office', 'dates': [self.day2]}])
+        mail.outbox = []
+        resp = self.reject()
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.membership.refresh_from_db()
+        self.assertFalse(self.membership.schedule_change_requested)
+        self.assertIsNone(self.membership.pending_components)
+        # Original schedule preserved (Private Office still just tomorrow).
+        self.assertEqual(self._comp(self.membership.custom_components, 'Private Office')['dates'],
+                         [self.tomorrow])
+        self.assertEqual(mail.outbox[-1].to, ['m@example.com'])
+        self.assertIn('declined', mail.outbox[-1].subject.lower())
+
+    def test_approve_without_request_rejected(self):
+        resp = self.approve()
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('no pending schedule change', str(resp.data).lower())
+
+    def test_admin_user_list_flags_change(self):
+        self.request_change([{'name': 'Private Office', 'dates': [self.tomorrow, self.day2]}])
+        resp = self.admin_client.get('/api/admin/users/')
+        row = next(u for u in resp.data if u['id'] == self.member.id)
+        self.assertTrue(row['schedule_change_requested'])
+        self.assertEqual(row['schedule_change_days'], 2)

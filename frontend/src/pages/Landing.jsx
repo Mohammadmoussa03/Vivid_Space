@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import logoColor from '../assets/vividspace-logo.png';
+import logoWhite from '../assets/vividspace-logo-white.png';
 import { useAuth } from '../context/AuthContext';
 import { MS, TONES, useVW, buildCalendar, fmtDate, apiError, safeUrl } from '../lib/ms';
 import { Reveal, RevealCard, CountUp } from '../lib/motion';
 import {
   getSite, getPublicPackages, getCategories, getPublicSpaces, getFaqs,
   getAvailability, createBooking, submitTour, submitCustomization, getOverview, getBookings, cancelBooking,
+  requestBookingChange, requestScheduleChange,
 } from '../lib/services';
 
 /* ---------------- static design content (no backend equivalent) ---------------- */
@@ -271,8 +274,12 @@ export default function Landing() {
       >
         <div style={{ maxWidth: 1600, margin: '0 auto', height: 84, padding: '0 clamp(20px,4vw,48px)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <a href="#top" onMouseEnter={() => setOpenMenu(null)} onClick={(e) => { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
-            style={{ display: 'flex', alignItems: 'center', gap: 12, textDecoration: 'none', color: navSolid ? MS.ink : 'rgba(255,255,255,0.96)', transition: 'color 300ms ease-out' }}>
-            <span style={{ fontFamily: MS.serif, fontWeight: 800, fontSize: 30, letterSpacing: '-0.01em' }}>VIVIDSPACE</span>
+            aria-label="VividSpace — home" style={{ display: 'flex', alignItems: 'center', textDecoration: 'none' }}>
+            {/* Colour logo on the solid cream bar; white logo over the dark hero — crossfaded. */}
+            <span style={{ position: 'relative', display: 'block', height: 62 }}>
+              <img src={logoColor} alt="VividSpace" style={{ height: '100%', width: 'auto', display: 'block', opacity: navSolid ? 1 : 0, transition: 'opacity 300ms ease-out' }} />
+              <img src={logoWhite} alt="" aria-hidden="true" style={{ position: 'absolute', top: 0, left: 0, height: '100%', width: 'auto', display: 'block', opacity: navSolid ? 0 : 1, transition: 'opacity 300ms ease-out' }} />
+            </span>
           </a>
 
           {showDesktopNav ? (
@@ -637,10 +644,7 @@ export default function Landing() {
         <div style={{ maxWidth: 1280, margin: '0 auto' }}>
           <div style={{ display: 'grid', gridTemplateColumns: vw < 720 ? '1fr' : '1.8fr repeat(3, 1fr)', gap: 'clamp(24px,4vw,48px)', paddingBottom: 48 }}>
             <Reveal>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18 }}>
-                <span style={{ width: 40, height: 40, borderRadius: 11, background: MS.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', color: MS.ink, fontFamily: MS.serif, fontWeight: 800, fontSize: 24 }}>V</span>
-                <span style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 24 }}>VIVIDSPACE</span>
-              </div>
+              <img src={logoWhite} alt="VividSpace" style={{ height: 68, width: 'auto', display: 'block', marginBottom: 18 }} />
               <p style={{ color: 'rgba(245,241,237,0.7)', fontSize: 15, lineHeight: 1.6, margin: 0, maxWidth: 300 }}>{footer.note || FOOTER_NOTE}</p>
             </Reveal>
             {(footer.columns || FOOTER_COLS).map((col, i) => (
@@ -665,7 +669,42 @@ export default function Landing() {
       {bookingSpace && <BookingModal space={bookingSpace} onClose={() => setBookingSpace(null)} />}
       {authOpen && <AuthModal onClose={() => { setAuthOpen(false); setResetInfo(null); }} onAuthed={onAuthed} goDashboard={goDashboard} resetInfo={resetInfo} />}
       {dashOpen && <DashboardModal user={user} onClose={() => setDashOpen(false)} />}
+
+      {/* Floating WhatsApp click-to-chat (hidden while the dashboard is open). */}
+      {!dashOpen && <WhatsAppBubble number={site?.contact?.whatsapp} message={site?.contact?.whatsapp_message} />}
     </div>
+  );
+}
+
+/* ---------------- Floating WhatsApp bubble ---------------- */
+// Renders nothing unless an admin has set a WhatsApp number. Opens wa.me in a new
+// tab with the digits-only number and an optional prefilled message.
+function WhatsAppBubble({ number, message }) {
+  const [hover, setHover] = useState(false);
+  const digits = String(number || '').replace(/[^\d]/g, '');
+  if (!digits) return null;
+  const href = `https://wa.me/${digits}${message ? `?text=${encodeURIComponent(message)}` : ''}`;
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" aria-label="Chat with us on WhatsApp"
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      style={{ position: 'fixed', right: 'clamp(16px,3vw,28px)', bottom: 'clamp(16px,3vw,28px)', zIndex: 80,
+        display: 'flex', alignItems: 'center', gap: 12, textDecoration: 'none' }}>
+      {/* Slide-in "Chat with us" label — collapses to width 0 when not hovered. */}
+      <span style={{ overflow: 'hidden', maxWidth: hover ? 200 : 0, opacity: hover ? 1 : 0,
+        background: '#fff', color: MS.ink, fontFamily: MS.sans, fontSize: 14.5, fontWeight: 600, whiteSpace: 'nowrap',
+        padding: hover ? '11px 16px' : '11px 0', borderRadius: 9999, boxShadow: '0 8px 24px rgba(20,18,16,0.16)',
+        transition: 'max-width 300ms cubic-bezier(.22,.61,.36,1), opacity 220ms ease-out, padding 300ms cubic-bezier(.22,.61,.36,1)' }}>
+        Chat with us
+      </span>
+      <span style={{ flex: '0 0 auto', width: 60, height: 60, borderRadius: 9999, background: '#25D366', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        boxShadow: hover ? '0 14px 34px rgba(37,211,102,0.5)' : '0 10px 26px rgba(37,211,102,0.38)',
+        transform: hover ? 'translateY(-2px) scale(1.06)' : 'translateY(0) scale(1)',
+        transition: 'transform 220ms cubic-bezier(.22,.61,.36,1), box-shadow 220ms ease-out' }}>
+        <svg width="30" height="30" viewBox="0 0 24 24" fill="#fff" aria-hidden="true">
+          <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.885-9.885 9.885M20.52 3.449C18.24 1.245 15.24 0 12.045 0 5.463 0 .104 5.359.101 11.944c0 2.096.548 4.142 1.588 5.945L0 24l6.335-1.652a11.882 11.882 0 005.71 1.447h.005c6.585 0 11.946-5.359 11.949-11.945a11.821 11.821 0 00-3.481-8.4"/>
+        </svg>
+      </span>
+    </a>
   );
 }
 
@@ -951,9 +990,12 @@ function PackageModal({ pkg, onClose, onContact }) {
 /* ---------------- Customize-your-package modal (POST /customize/) ---------------- */
 // Distinct swatches so each office type reads clearly on the shared calendar.
 const OFFICE_COLORS = ['#9B7EBD', '#4F8A76', '#C0844E', '#5E79A8', '#B0678E', '#6E9E52', '#A85C5C', '#7C6FB0'];
+// Selectable start times for hourly offices (07:00–21:00).
+const TIME_OPTIONS = Array.from({ length: 15 }, (_, i) => `${String(7 + i).padStart(2, '0')}:00`);
 function CustomizeModal({ offices, onClose }) {
   const [f, setF] = useState({ name: '', email: '', phone: '', details: '' });
   const [assign, setAssign] = useState({});             // iso day -> office name (one office per day)
+  const [timing, setTiming] = useState({});             // office name -> { duration, start_time, hours }
   const [active, setActive] = useState(offices[0] || ''); // office the calendar taps assign to
   const [monthOffset, setMonthOffset] = useState(0);
   const [err, setErr] = useState({});
@@ -961,6 +1003,10 @@ function CustomizeModal({ offices, onClose }) {
   const set = (k) => (e) => { setF((s) => ({ ...s, [k]: e.target.value })); setErr((s) => ({ ...s, [k]: undefined })); };
   const bd = (k) => (err[k] ? '#C77' : MS.line);
   const colorOf = (office) => OFFICE_COLORS[Math.max(0, offices.indexOf(office)) % OFFICE_COLORS.length];
+  // Time of day chosen for each office (defaults to a full day).
+  const timeOf = (office) => timing[office] || { duration: 'fullday', start_time: '09:00', hours: 2 };
+  const setTime = (office, patch) => setTiming((t) => ({ ...t, [office]: { ...timeOf(office), ...patch } }));
+  const timeLabel = (office) => { const t = timeOf(office); return t.duration === 'hourly' ? `${t.start_time} · ${t.hours}h` : 'Full day'; };
 
   const cal = buildCalendar(monthOffset, null);
   // Selectable (non-empty, not-past) cells in the month currently shown.
@@ -1000,10 +1046,15 @@ function CustomizeModal({ offices, onClose }) {
     else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(f.email)) er.email = 'Enter a valid email';
     if (totalDays === 0) er.days = 'Add at least one day for one office';
     if (Object.keys(er).length) { setErr(er); return; }
-    // Group the assigned days back into one line per office.
+    // Group the assigned days back into one line per office, carrying its time of day.
     const byOffice = {};
     Object.entries(assign).forEach(([iso, off]) => { (byOffice[off] = byOffice[off] || []).push(iso); });
-    const items = Object.entries(byOffice).map(([office, ds]) => ({ office, dates: ds.sort() }));
+    const items = Object.entries(byOffice).map(([office, ds]) => {
+      const t = timeOf(office);
+      const item = { office, dates: ds.sort(), duration: t.duration };
+      if (t.duration === 'hourly') { item.start_time = t.start_time; item.hours = t.hours; }
+      return item;
+    });
     setStatus('loading');
     try {
       await submitCustomization({ name: f.name, email: f.email, phone: f.phone, details: f.details, items });
@@ -1063,10 +1114,41 @@ function CustomizeModal({ offices, onClose }) {
             )}
           </div>
 
-          {/* 2 — the shared calendar; taps colour a day for the active office */}
+          {/* 2 — set the time of day for the active office (full day or specific hours) */}
+          {active && (
+            <div>
+              <label style={label}>2. Set the time for {active}</label>
+              <div style={{ display: 'inline-flex', gap: 4, background: MS.line2, padding: 3, borderRadius: 10, marginBottom: 12 }}>
+                {[['fullday', 'Full day'], ['hourly', 'Specific hours']].map(([v, l]) => {
+                  const on = timeOf(active).duration === v;
+                  return (
+                    <button key={v} type="button" onClick={() => setTime(active, { duration: v })}
+                      style={{ padding: '7px 15px', borderRadius: 8, border: 'none', cursor: 'pointer', fontFamily: MS.sans, fontSize: 13, fontWeight: 600, background: on ? '#fff' : 'transparent', color: on ? MS.ink : MS.faint, boxShadow: on ? '0 1px 2px rgba(20,18,16,0.12)' : 'none' }}>{l}</button>
+                  );
+                })}
+              </div>
+              {timeOf(active).duration === 'hourly' && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18, alignItems: 'flex-end' }}>
+                  <div>
+                    <p style={{ fontSize: 12.5, color: MS.faint, margin: '0 0 6px' }}>Start time</p>
+                    <select value={timeOf(active).start_time} onChange={(e) => setTime(active, { start_time: e.target.value })}
+                      style={{ ...inputStyle, width: 'auto', padding: '10px 12px' }}>
+                      {TIME_OPTIONS.map((t) => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <p style={{ fontSize: 12.5, color: MS.faint, margin: '0 0 6px' }}>Hours</p>
+                    <Stepper value={timeOf(active).hours} min={1} max={12} onChange={(v) => setTime(active, { hours: v })} suffix={timeOf(active).hours > 1 ? 'hrs' : 'hr'} />
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 3 — the shared calendar; taps colour a day for the active office */}
           <div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
-              <label style={{ ...label, marginBottom: 0 }}>2. Select your days</label>
+              <label style={{ ...label, marginBottom: 0 }}>3. Select your days</label>
               <button type="button" onClick={toggleMonth} disabled={!active} style={{ flex: '0 0 auto', background: monthFull ? MS.accent : 'transparent', color: monthFull ? '#fff' : MS.accent, border: `1.5px solid ${MS.accent}`, borderRadius: 9999, padding: '7px 16px', fontSize: 13, fontWeight: 600, cursor: active ? 'pointer' : 'not-allowed', opacity: active ? 1 : 0.5 }}>
                 {monthFull ? 'Clear this month' : 'Select full month'}
               </button>
@@ -1098,7 +1180,7 @@ function CustomizeModal({ offices, onClose }) {
                 {offices.filter((o) => counts[o]).map((o) => (
                   <span key={o} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 13, color: '#3A362F', background: MS.line2, padding: '6px 12px', borderRadius: 9999 }}>
                     <span style={{ width: 10, height: 10, borderRadius: 9999, background: colorOf(o), flex: '0 0 auto' }} />
-                    {counts[o]} day{counts[o] > 1 ? 's' : ''} · {o}
+                    {counts[o]} day{counts[o] > 1 ? 's' : ''} · {o} · {timeLabel(o)}
                   </span>
                 ))}
               </div>
@@ -1211,7 +1293,7 @@ function AuthModal({ onClose, onAuthed, goDashboard, resetInfo }) {
       <div onClick={(e) => e.stopPropagation()} style={{ position: 'relative', background: MS.panel, width: 'min(440px, 100%)', borderRadius: 22, padding: 'clamp(28px,4vw,40px)', boxShadow: '0 30px 80px rgba(20,18,16,0.32)', animation: 'ms-modal 220ms ease-out both' }}>
         <button onClick={onClose} aria-label="Close" style={{ position: 'absolute', top: 18, right: 20, width: 38, height: 38, borderRadius: 9999, border: `1px solid ${MS.line}`, background: '#fff', color: MS.ink, fontSize: 16, cursor: 'pointer' }}>✕</button>
         <div style={{ textAlign: 'center', marginBottom: 26 }}>
-          <span style={{ fontFamily: MS.serif, fontWeight: 800, fontSize: 28, letterSpacing: '-0.01em' }}>VIVIDSPACE</span>
+          <img src={logoColor} alt="VividSpace" style={{ height: 66, width: 'auto', display: 'inline-block' }} />
         </div>
         {err && <p style={{ background: 'rgba(168,90,74,0.12)', color: MS.red, fontSize: 13.5, fontWeight: 500, padding: '11px 14px', borderRadius: 10, margin: '0 0 18px', lineHeight: 1.4 }}>{err}</p>}
 
@@ -1539,6 +1621,7 @@ function DashboardModal({ user, onClose }) {
   const [tab, setTab] = useState('upcoming');
   const [bookings, setBookings] = useState([]);
   const [detail, setDetail] = useState(null);
+  const [reschedule, setReschedule] = useState(null);   // booking being rescheduled
   const [allocMonthIdx, setAllocMonthIdx] = useState(0);
 
   const name = user?.first_name || user?.full_name?.split(' ')[0] || 'there';
@@ -1551,6 +1634,12 @@ function DashboardModal({ user, onClose }) {
     try { await cancelBooking(id); load(tab); getOverview().then(setOverview).catch(() => {}); setDetail(null); }
     catch { /* ignore */ }
   };
+  // A reschedule request was submitted — reflect the now-locked booking.
+  const onRescheduled = () => { setReschedule(null); setDetail(null); load(tab); };
+
+  const [scheduleEdit, setScheduleEdit] = useState(false);   // package-schedule editor open
+  // A schedule change was submitted — refresh the membership to show the pending state.
+  const onScheduleRequested = () => { setScheduleEdit(false); getOverview().then(setOverview).catch(() => {}); };
 
   const m = overview?.membership;
   const stats = overview?.stats || {};
@@ -1567,6 +1656,9 @@ function DashboardModal({ user, onClose }) {
     const col = OFFICE_COLORS[ci % OFFICE_COLORS.length];
     (c.dates || []).forEach((iso) => { dayColor[iso] = col; dayName[iso] = c.name; });
   });
+  // Packages whose days the member is allowed to rearrange (lifetime ones are fixed).
+  const editableComps = (m?.custom_components || []).filter((c) => c && !c.lifetime && c.name);
+  const schedulePending = !!m?.schedule_change_requested;
   const allocMonths = Array.from(new Set(Object.keys(dayColor).map((iso) => iso.slice(0, 7)))).sort();
   const selMonth = allocMonths[Math.min(allocMonthIdx, allocMonths.length - 1)] || null;
   let allocCal = null;
@@ -1585,10 +1677,10 @@ function DashboardModal({ user, onClose }) {
   );
 
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 90, background: MS.bg, overflowY: 'auto', animation: 'ms-fade 240ms ease-out both' }}>
+    <div style={{ position: 'fixed', inset: 0, zIndex: 90, background: MS.bg, overflowY: 'auto', animation: 'ms-appear 240ms ease-out both' }}>
       <div style={{ position: 'sticky', top: 0, zIndex: 2, background: 'rgba(245,241,237,0.92)', backdropFilter: 'blur(12px)', borderBottom: `1px solid ${MS.line}` }}>
         <div style={{ maxWidth: 1180, margin: '0 auto', height: 72, padding: '0 clamp(16px,4vw,32px)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
-          <span style={{ fontFamily: MS.serif, fontWeight: 800, fontSize: 24, letterSpacing: '-0.01em' }}>VIVIDSPACE</span>
+          <img src={logoColor} alt="VividSpace" style={{ height: 46, width: 'auto', display: 'block' }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, minWidth: 0 }}>
             <span style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
               <span style={{ width: 34, height: 34, flex: '0 0 auto', borderRadius: 9999, background: MS.accent2, color: MS.ink, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MS.serif, fontWeight: 700, fontSize: 16 }}>{(name[0] || 'M').toUpperCase()}</span>
@@ -1624,10 +1716,18 @@ function DashboardModal({ user, onClose }) {
 
         {allocComps.length > 0 && (
           <div style={{ background: '#fff', border: `1px solid ${MS.line}`, borderRadius: 16, padding: 'clamp(20px,3vw,28px)', marginBottom: 44 }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 18 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 18 }}>
               <h2 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 'clamp(20px,2.6vw,24px)', margin: 0 }}>Your package{m?.display_name ? ` · ${m.display_name}` : ''}</h2>
-              <span style={{ color: MS.muted, fontSize: 14 }}>{[Object.keys(dayColor).length > 0 ? `${Object.keys(dayColor).length} days planned` : '', allocComps.some((c) => c.lifetime) ? 'lifetime access' : ''].filter(Boolean).join(' · ')}</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <span style={{ color: MS.muted, fontSize: 14 }}>{[Object.keys(dayColor).length > 0 ? `${Object.keys(dayColor).length} days planned` : '', allocComps.some((c) => c.lifetime) ? 'lifetime access' : ''].filter(Boolean).join(' · ')}</span>
+                {schedulePending
+                  ? <span style={{ background: TONES.lilac.bg, color: TONES.lilac.color, fontSize: 12.5, fontWeight: 600, padding: '6px 13px', borderRadius: 9999 }}>Change pending review</span>
+                  : editableComps.length > 0 && <button onClick={() => setScheduleEdit(true)} style={{ background: 'none', border: `1px solid ${MS.accent}`, color: MS.accent, fontSize: 13.5, fontWeight: 600, padding: '8px 16px', borderRadius: 9999, cursor: 'pointer' }}>Edit schedule</button>}
+              </div>
             </div>
+            {schedulePending && (
+              <p style={{ background: TONES.lilac.bg, color: TONES.lilac.color, fontSize: 13.5, fontWeight: 500, padding: '11px 15px', borderRadius: 12, margin: '0 0 18px', lineHeight: 1.5 }}>You've requested changes to your schedule below. Our team is reviewing them — your current schedule stays in place until they're approved.</p>
+            )}
             {/* Legend — days per package */}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 20 }}>
               {allocComps.map((c, ci) => (
@@ -1674,17 +1774,25 @@ function DashboardModal({ user, onClose }) {
           {bookings.map((r) => {
             const tone = TONES[RES_TONE[r.status] || 'neutral'];
             const payTone = r.free ? TONES.green : TONES.amber;
-            const cancellable = r.when === 'upcoming';
+            const locked = !!r.change_requested;            // awaiting admin review — no further edits
+            const cancellable = r.when === 'upcoming' && !locked;
+            const reschedulable = r.when === 'upcoming' && !locked;
             return (
-              <div key={r.id} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '16px 24px', background: '#fff', border: `1px solid ${MS.line}`, borderRadius: 16, padding: '20px 24px' }}>
+              <div key={r.id} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '16px 24px', background: '#fff', border: `1px solid ${locked ? MS.accent : MS.line}`, borderRadius: 16, padding: '20px 24px' }}>
                 <div style={{ flex: '1 1 220px', minWidth: 0 }}>
                   <h3 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 20, margin: '0 0 5px' }}>{r.space}</h3>
                   <p style={{ color: MS.muted, fontSize: 14, margin: 0 }}>{r.mon} {r.day} · {r.time} · {r.duration === 'fullday' ? 'Full day' : 'Hourly'}{r.attendees ? ` · ${r.attendees} guests` : ''}</p>
+                  {locked && r.requested && (
+                    <p style={{ color: MS.accent, fontSize: 13, fontWeight: 500, margin: '7px 0 0' }}>Change requested → {r.requested.mon} {r.requested.day} · {r.requested.time} — awaiting review</p>
+                  )}
                 </div>
-                <span style={{ flex: '0 0 auto', background: tone.bg, color: tone.color, fontSize: 12.5, fontWeight: 600, padding: '5px 13px', borderRadius: 9999 }}>{r.status}</span>
+                {locked
+                  ? <span style={{ flex: '0 0 auto', background: TONES.lilac.bg, color: TONES.lilac.color, fontSize: 12.5, fontWeight: 600, padding: '5px 13px', borderRadius: 9999 }}>Change pending</span>
+                  : <span style={{ flex: '0 0 auto', background: tone.bg, color: tone.color, fontSize: 12.5, fontWeight: 600, padding: '5px 13px', borderRadius: 9999 }}>{r.status}</span>}
                 <span style={{ flex: '0 0 auto', background: payTone.bg, color: payTone.color, fontSize: 12.5, fontWeight: 600, padding: '5px 13px', borderRadius: 9999 }}>{r.cost}</span>
                 <div style={{ flex: '0 0 auto', display: 'flex', gap: 8 }}>
                   <button onClick={() => setDetail(r)} style={{ background: 'none', border: `1px solid ${MS.line}`, color: MS.ink, fontSize: 13.5, fontWeight: 600, padding: '8px 16px', borderRadius: 9999, cursor: 'pointer' }}>Details</button>
+                  {reschedulable && <button onClick={() => setReschedule(r)} style={{ background: 'none', border: `1px solid ${MS.accent}`, color: MS.accent, fontSize: 13.5, fontWeight: 600, padding: '8px 16px', borderRadius: 9999, cursor: 'pointer' }}>Reschedule</button>}
                   {cancellable && <button onClick={() => doCancel(r.id)} style={{ background: 'none', border: '1px solid rgba(168,90,74,0.4)', color: MS.red, fontSize: 13.5, fontWeight: 600, padding: '8px 16px', borderRadius: 9999, cursor: 'pointer' }}>Cancel</button>}
                 </div>
               </div>
@@ -1705,13 +1813,297 @@ function DashboardModal({ user, onClose }) {
               <SumRow label="Time" value={detail.time} />
               <SumRow label="Duration" value={detail.duration === 'fullday' ? 'Full day' : 'Hourly'} />
               <SumRow label="Attendees" value={String(detail.attendees || 1)} />
-              <SumRow label="Status" value={detail.status} />
+              <SumRow label="Status" value={detail.change_requested ? 'Change pending' : detail.status} />
               <SumRow label="Payment" value={detail.cost} />
+              {detail.change_requested && detail.requested && (
+                <SumRow label="Requested" value={`${detail.requested.mon} ${detail.requested.day} · ${detail.requested.time}`} />
+              )}
             </div>
-            {detail.when === 'upcoming' && <button onClick={() => doCancel(detail.id)} style={{ width: '100%', marginTop: 24, background: 'none', border: '1.5px solid rgba(168,90,74,0.5)', color: MS.red, fontSize: 15, fontWeight: 600, padding: 13, borderRadius: 9999, cursor: 'pointer' }}>Cancel booking</button>}
+            {detail.change_requested ? (
+              <p style={{ marginTop: 22, background: TONES.lilac.bg, color: TONES.lilac.color, fontSize: 13.5, fontWeight: 500, padding: '11px 14px', borderRadius: 10, textAlign: 'center' }}>Your reschedule request is awaiting admin review.</p>
+            ) : detail.when === 'upcoming' && (
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 24 }}>
+                <button onClick={() => setReschedule(detail)} style={{ flex: '1 1 auto', background: MS.accent, border: 'none', color: '#fff', fontSize: 15, fontWeight: 600, padding: 13, borderRadius: 9999, cursor: 'pointer' }}>Reschedule</button>
+                <button onClick={() => doCancel(detail.id)} style={{ flex: '1 1 auto', background: 'none', border: '1.5px solid rgba(168,90,74,0.5)', color: MS.red, fontSize: 15, fontWeight: 600, padding: 13, borderRadius: 9999, cursor: 'pointer' }}>Cancel booking</button>
+              </div>
+            )}
           </div>
         </div>
       )}
+
+      {reschedule && <RescheduleModal booking={reschedule} onClose={() => setReschedule(null)} onDone={onRescheduled} />}
+      {scheduleEdit && <ScheduleEditModal components={editableComps} onClose={() => setScheduleEdit(false)} onDone={onScheduleRequested} />}
+    </div>
+  );
+}
+
+/* ---------------- Schedule editor (member reallocates package days) ---------------- */
+// Members can rearrange which of their packages covers which day, then submit the
+// new schedule for admin review. Only the packages they already have are editable
+// (lifetime ones are fixed and handled server-side); nothing changes until approved.
+function ScheduleEditModal({ components, onClose, onDone }) {
+  // Stable package list (name is the identity the backend validates against).
+  const packages = components.map((c) => c.name);
+  const planOf = (name) => components.find((c) => c.name === name)?.plan;
+  const colorOf = (name) => OFFICE_COLORS[Math.max(0, packages.indexOf(name)) % OFFICE_COLORS.length];
+
+  const [assign, setAssign] = useState(() => {
+    const a = {};
+    components.forEach((c) => (c.dates || []).forEach((iso) => { a[iso] = c.name; }));
+    return a;
+  });
+  const [active, setActive] = useState(packages[0] || '');
+  const [monthOffset, setMonthOffset] = useState(0);
+  const [err, setErr] = useState('');
+  const [status, setStatus] = useState('idle'); // idle | loading | success | failure
+
+  const cal = buildCalendar(monthOffset, null);
+  const monthCells = cal.cells.filter((c) => !c.empty && !c.past);
+  const monthFull = monthCells.length > 0 && monthCells.every((c) => assign[c.iso] === active);
+  const counts = packages.reduce((acc, p) => ({ ...acc, [p]: 0 }), {});
+  Object.values(assign).forEach((p) => { counts[p] = (counts[p] || 0) + 1; });
+  const totalDays = Object.keys(assign).length;
+
+  const toggleDay = (iso) => {
+    if (!active) return;
+    setErr('');
+    setAssign((a) => { const n = { ...a }; if (n[iso] === active) delete n[iso]; else n[iso] = active; return n; });
+  };
+  const toggleMonth = () => {
+    if (!active) return;
+    setErr('');
+    setAssign((a) => {
+      const n = { ...a };
+      monthCells.forEach((c) => { if (monthFull) { if (n[c.iso] === active) delete n[c.iso]; } else { n[c.iso] = active; } });
+      return n;
+    });
+  };
+
+  useEffect(() => {
+    const onKey = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const submit = async () => {
+    setErr(''); setStatus('loading');
+    // One line per package (including any the member emptied, so those days clear).
+    const payload = { components: packages.map((name) => ({
+      name, plan: planOf(name),
+      dates: Object.entries(assign).filter(([, p]) => p === name).map(([iso]) => iso).sort(),
+    })) };
+    try { await requestScheduleChange(payload); setStatus('success'); }
+    catch (ex) { setErr(apiError(ex, 'Could not submit your request.')); setStatus('failure'); }
+  };
+
+  const card = {
+    position: 'relative', background: MS.panel, width: 'min(560px, 100%)', maxHeight: '90vh', overflowY: 'auto',
+    borderRadius: 22, padding: 'clamp(24px,4vw,36px)', boxShadow: '0 30px 80px rgba(20,18,16,0.32)', animation: 'ms-modal 220ms ease-out both',
+  };
+  const close = (
+    <button onClick={onClose} aria-label="Close" style={{ position: 'absolute', top: 16, right: 16, width: 38, height: 38, borderRadius: 9999, border: `1px solid ${MS.line}`, background: '#fff', color: MS.ink, fontSize: 16, cursor: 'pointer' }}>✕</button>
+  );
+
+  if (status === 'success') return (
+    <div onClick={onClose} style={overlay()}>
+      <div onClick={(e) => e.stopPropagation()} style={{ ...card, textAlign: 'center' }}>
+        {close}
+        <span style={{ width: 60, height: 60, borderRadius: 9999, background: 'rgba(63,122,90,0.14)', color: MS.green, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, margin: '10px 0 20px', animation: 'ms-pop 500ms ease-out both' }}>✓</span>
+        <h3 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 26, margin: '0 0 10px' }}>Request sent for review</h3>
+        <p style={{ color: 'rgba(26,26,26,0.72)', fontSize: 16, lineHeight: 1.6, margin: '0 0 26px' }}>Our team will review your new schedule and apply it once approved. Your current schedule stays in place until then.</p>
+        <button onClick={onDone} className="ms-submit" style={{ ...purpleBtn, background: 'linear-gradient(135deg,#B48FD6,#9B7EBD)' }}>Done</button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div onClick={onClose} style={overlay()}>
+      <div onClick={(e) => e.stopPropagation()} style={card}>
+        {close}
+        <p style={{ color: MS.accent, fontSize: 12, fontWeight: 600, letterSpacing: '0.16em', textTransform: 'uppercase', margin: '0 0 8px' }}>Edit your schedule</p>
+        <h3 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 'clamp(22px,3vw,28px)', margin: '0 0 6px', paddingRight: 40 }}>Rearrange your package days</h3>
+        <p style={{ color: MS.muted, fontSize: 14.5, lineHeight: 1.55, margin: '0 0 22px' }}>Pick a package, then tap the days you want it — the change is sent to our team for review and your current schedule stays until it's approved.</p>
+
+        {/* Package picker */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
+          {packages.map((p) => {
+            const on = active === p;
+            const col = colorOf(p);
+            return (
+              <button key={p} type="button" onClick={() => setActive(p)}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 8, border: `1.5px solid ${on ? col : MS.line}`, background: on ? col : '#fff', color: on ? '#fff' : MS.ink, borderRadius: 9999, padding: '9px 15px', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>
+                <span style={{ width: 11, height: 11, borderRadius: 9999, background: on ? '#fff' : col, flex: '0 0 auto' }} />
+                {p}{counts[p] ? <span style={{ fontWeight: 600, opacity: 0.9 }}>· {counts[p]}</span> : null}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Calendar */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+          <p style={{ fontSize: 13, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: MS.faint, margin: 0 }}>Select days</p>
+          <button type="button" onClick={toggleMonth} disabled={!active} style={{ flex: '0 0 auto', background: monthFull ? MS.accent : 'transparent', color: monthFull ? '#fff' : MS.accent, border: `1.5px solid ${MS.accent}`, borderRadius: 9999, padding: '7px 16px', fontSize: 13, fontWeight: 600, cursor: active ? 'pointer' : 'not-allowed', opacity: active ? 1 : 0.5 }}>
+            {monthFull ? 'Clear this month' : 'Select full month'}
+          </button>
+        </div>
+        <div style={{ background: '#fff', border: `1px solid ${MS.line}`, borderRadius: 14, padding: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+            <button type="button" onClick={() => setMonthOffset((o) => Math.max(0, o - 1))} style={calNavBtn(monthOffset > 0)}>‹</button>
+            <p style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 16, margin: 0, minWidth: 128, textAlign: 'center' }}>{cal.label}</p>
+            <button type="button" onClick={() => setMonthOffset((o) => o + 1)} style={calNavBtn(true)}>›</button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3, marginBottom: 4 }}>
+            {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map((w) => <div key={w} style={{ textAlign: 'center', fontSize: 11, color: '#A9A39C', padding: '3px 0' }}>{w}</div>)}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3 }}>
+            {cal.cells.map((c, i) => {
+              if (c.empty) return <div key={i} style={{ aspectRatio: '1' }} />;
+              const p = assign[c.iso];
+              return (
+                <div key={i} style={{ aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <button type="button" disabled={c.past || !active} onClick={() => toggleDay(c.iso)} title={p || ''} style={{ width: '100%', height: '100%', border: p === active ? '2px solid rgba(0,0,0,0.35)' : 'none', borderRadius: 9, background: p ? colorOf(p) : 'transparent', color: p ? '#fff' : (c.past ? '#C4BEB6' : MS.ink), fontSize: 13.5, fontWeight: p ? 600 : 400, cursor: (c.past || !active) ? 'not-allowed' : 'pointer' }}>{c.day}</button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Summary */}
+        {totalDays > 0 ? (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '14px 0 0' }}>
+            {packages.filter((p) => counts[p]).map((p) => (
+              <span key={p} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 13, color: '#3A362F', background: MS.line2, padding: '6px 12px', borderRadius: 9999 }}>
+                <span style={{ width: 10, height: 10, borderRadius: 9999, background: colorOf(p), flex: '0 0 auto' }} />
+                {counts[p]} day{counts[p] > 1 ? 's' : ''} · {p}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p style={{ fontSize: 13, color: '#A9A39C', margin: '12px 0 0' }}>Tap days to assign them — leaving a package empty clears its days.</p>
+        )}
+
+        {err && <p style={{ background: 'rgba(168,90,74,0.12)', color: MS.red, fontSize: 13.5, fontWeight: 500, padding: '11px 14px', borderRadius: 10, margin: '18px 0 0', lineHeight: 1.4 }}>{err}</p>}
+
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 22 }}>
+          <button onClick={submit} disabled={status === 'loading'} className="ms-submit"
+            style={{ ...purpleBtn, flex: '1 1 auto', background: 'linear-gradient(135deg,#B48FD6,#9B7EBD)', opacity: status === 'loading' ? 0.75 : 1, cursor: status === 'loading' ? 'default' : 'pointer' }}>
+            {status === 'loading' ? 'Submitting…' : 'Submit for review'}
+          </button>
+          <button onClick={onClose} className="ms-ghost" style={ghostBtn}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Reschedule modal (member requests a new date/time) ---------------- */
+// Submitting sends the request to the admin for review — the booking is locked
+// as "change pending" until it's approved or rejected. Space/length are kept;
+// only the date (and, for hourly bookings, the start time) can change.
+function RescheduleModal({ booking, onClose, onDone }) {
+  const isHourly = booking.duration !== 'fullday';
+  const [monthOffset, setMonthOffset] = useState(0);
+  const [date, setDate] = useState(null);
+  const [slot, setSlot] = useState(null);
+  const [avail, setAvail] = useState(null);
+  const [availLoading, setAvailLoading] = useState(false);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const cal = buildCalendar(monthOffset, date);
+
+  useEffect(() => {
+    const onKey = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  useEffect(() => {
+    if (!isHourly || !date) { setAvail(null); return undefined; }
+    let alive = true;
+    setAvailLoading(true); setSlot(null);
+    getAvailability(booking.space_key, date)
+      .then((d) => { if (alive) setAvail(d); })
+      .catch(() => { if (alive) setAvail(null); })
+      .finally(() => { if (alive) setAvailLoading(false); });
+    return () => { alive = false; };
+  }, [date, booking.space_key, isHourly]);
+
+  const canSubmit = !!date && (!isHourly || !!slot) && !busy;
+  const slots = avail?.slots || [];
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    setErr(''); setBusy(true);
+    try {
+      await requestBookingChange(booking.id, isHourly ? { date, start_time: slot } : { date });
+      onDone();
+    } catch (ex) { setErr(apiError(ex, 'Could not submit your request.')); setBusy(false); }
+  };
+
+  const card = {
+    position: 'relative', background: MS.panel, width: 'min(560px, 100%)', maxHeight: '90vh', overflowY: 'auto',
+    borderRadius: 22, padding: 'clamp(24px,4vw,36px)', boxShadow: '0 30px 80px rgba(20,18,16,0.32)', animation: 'ms-modal 220ms ease-out both',
+  };
+
+  return (
+    <div onClick={onClose} style={overlay()}>
+      <div onClick={(e) => e.stopPropagation()} style={card}>
+        <button onClick={onClose} aria-label="Close" style={{ position: 'absolute', top: 16, right: 16, width: 38, height: 38, borderRadius: 9999, border: `1px solid ${MS.line}`, background: '#fff', color: MS.ink, fontSize: 16, cursor: 'pointer' }}>✕</button>
+        <p style={{ color: MS.accent, fontSize: 12, fontWeight: 600, letterSpacing: '0.16em', textTransform: 'uppercase', margin: '0 0 8px' }}>Request a change</p>
+        <h3 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 'clamp(22px,3vw,28px)', margin: '0 0 6px', paddingRight: 40 }}>Reschedule {booking.space}</h3>
+        <p style={{ color: MS.muted, fontSize: 14.5, lineHeight: 1.55, margin: '0 0 22px' }}>Currently {booking.mon} {booking.day} · {booking.time}. Pick a new {isHourly ? 'date and time' : 'day'} — your request goes to our team for review and the booking stays as-is until it's approved.</p>
+
+        {/* Calendar */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+          <p style={{ fontSize: 13, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: MS.faint, margin: 0 }}>New date</p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button onClick={() => setMonthOffset((o) => Math.max(0, o - 1))} style={calNavBtn(monthOffset > 0)}>‹</button>
+            <p style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 16, margin: 0, minWidth: 128, textAlign: 'center' }}>{cal.label}</p>
+            <button onClick={() => setMonthOffset((o) => o + 1)} style={calNavBtn(true)}>›</button>
+          </div>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4, marginBottom: 6 }}>
+          {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map((w) => <div key={w} style={{ textAlign: 'center', fontSize: 12, color: '#A9A39C', padding: '4px 0' }}>{w}</div>)}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4 }}>
+          {cal.cells.map((c, i) => c.empty ? <div key={i} style={{ aspectRatio: '1' }} /> : (
+            <div key={i} style={{ aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <button disabled={c.past} onClick={() => setDate(c.iso)} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 10, background: c.sel ? MS.accent : 'transparent', color: c.sel ? '#fff' : (c.past ? '#C4BEB6' : MS.ink), fontSize: 14, fontWeight: c.sel ? 600 : 400, cursor: c.past ? 'not-allowed' : 'pointer' }}>{c.day}</button>
+            </div>
+          ))}
+        </div>
+
+        {/* Time slots (hourly only) */}
+        {isHourly && (
+          <div style={{ marginTop: 24 }}>
+            <p style={{ fontSize: 13, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: MS.faint, margin: '0 0 12px' }}>New time</p>
+            {!date ? <p style={{ color: MS.faint, fontSize: 14 }}>Pick a date to see open slots.</p>
+              : availLoading ? <p style={{ color: MS.faint, fontSize: 14 }}>Loading…</p>
+              : avail?.closed ? <p style={{ color: MS.red, fontSize: 14 }}>Closed on this day.</p>
+              : slots.length === 0 ? <p style={{ color: MS.faint, fontSize: 14 }}>No slots available.</p>
+              : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(74px, 1fr))', gap: 8 }}>
+                  {slots.map((s) => {
+                    const sel = slot === s.time;
+                    const disabled = !s.available;
+                    return (
+                      <button key={s.time} onClick={() => s.available && setSlot(s.time)} disabled={disabled}
+                        style={{ padding: '11px 0', borderRadius: 10, border: `1px solid ${sel ? MS.accent : (disabled ? '#EAE5DE' : MS.line)}`, background: sel ? 'rgba(155,126,189,0.18)' : (disabled ? MS.line2 : '#fff'), color: disabled ? '#B4AEA6' : MS.ink, fontSize: 14, fontWeight: 500, cursor: disabled ? 'not-allowed' : 'pointer', textDecoration: disabled ? 'line-through' : 'none' }}>{s.time}</button>
+                    );
+                  })}
+                </div>
+              )}
+          </div>
+        )}
+
+        {err && <p style={{ background: 'rgba(168,90,74,0.12)', color: MS.red, fontSize: 13.5, fontWeight: 500, padding: '11px 14px', borderRadius: 10, margin: '20px 0 0', lineHeight: 1.4 }}>{err}</p>}
+
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 24 }}>
+          <button onClick={submit} disabled={!canSubmit} style={{ flex: '1 1 auto', background: canSubmit ? MS.accent : '#ECE8E2', color: canSubmit ? '#fff' : '#A9A39C', border: 'none', fontSize: 15, fontWeight: 600, padding: 14, borderRadius: 9999, cursor: canSubmit ? 'pointer' : 'not-allowed' }}>{busy ? 'Submitting…' : 'Submit for review'}</button>
+          <button onClick={onClose} style={ghostBtn}>Cancel</button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -46,6 +46,10 @@ button, input, textarea, select { font-family: var(--font-sans); }
 /* Animations from the Mindspace design */
 @keyframes ms-dropdown { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes ms-fade { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+/* Opacity-only fade for full-screen overlays that host their own position:fixed
+   modals — a transform (even translateY(0)) would make the overlay a containing
+   block and break the centering of those fixed children. */
+@keyframes ms-appear { from { opacity: 0; } to { opacity: 1; } }
 /* Gentle drift for the floating hero glass cards */
 @keyframes ms-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-9px); } }
 /* Form entrance + success pop */

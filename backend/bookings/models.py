@@ -119,6 +119,11 @@ class Membership(models.Model):
     # A bespoke package name the admin chose for this member. When set it is shown
     # instead of the base plan's name; the `plan` FK still supplies included perks.
     custom_plan_name = models.CharField(max_length=120, blank=True)
+    # A member-proposed edit to their package schedule (custom_components) awaiting
+    # admin review. While `schedule_change_requested` is set the member can't edit
+    # again; approving copies `pending_components` into `custom_components`.
+    schedule_change_requested = models.BooleanField(default=False)
+    pending_components = models.JSONField(null=True, blank=True, default=None)
 
     def __str__(self):
         return f'{self.user.email} · {self.display_name}'
@@ -147,6 +152,17 @@ class Membership(models.Model):
         return bool(self.custom_plan_name or self.custom_components
                     or self.custom_price is not None or self.custom_price_label
                     or self.monthly_hours is not None)
+
+    @property
+    def has_schedule_change(self):
+        """Whether a member-proposed schedule edit is awaiting admin review."""
+        return bool(self.schedule_change_requested and self.pending_components is not None)
+
+    @property
+    def editable_components(self):
+        """The dated (non-lifetime) packages a member may reallocate days for."""
+        return [c for c in (self.custom_components or [])
+                if isinstance(c, dict) and not c.get('lifetime')]
 
     @property
     def effective_hours(self):
@@ -284,6 +300,12 @@ class Booking(models.Model):
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.CONFIRMED)
     # New reservations from the public site may await admin approval.
     is_pending = models.BooleanField(default=False)
+    # A member-requested reschedule awaiting admin review. While set, the booking
+    # is locked (the member can't edit/cancel it again) and the proposed new
+    # date/time live in the requested_* fields until the admin approves/rejects.
+    change_requested = models.BooleanField(default=False)
+    requested_date = models.DateField(null=True, blank=True)
+    requested_start_time = models.TimeField(null=True, blank=True)
     # Whether this booking was free with the plan (snapshot of the space at booking time).
     is_free = models.BooleanField(default=True)
     # Free meeting-room hours drawn down by this booking (for exact refund on cancel).
@@ -324,6 +346,8 @@ class Booking(models.Model):
         """Status bucket used by the admin reservations table."""
         if self.is_cancelled:
             return 'cancelled'
+        if self.change_requested and not self.is_past:
+            return 'change'
         if self.is_pending:
             return 'pending'
         return 'completed' if self.is_past else 'confirmed'
@@ -486,6 +510,11 @@ class AdminSettings(models.Model):
     phones = models.JSONField(default=list, blank=True)  # ["+1 555 0100", ...]
     address = models.CharField(max_length=240, blank=True)
     maps_url = models.CharField(max_length=500, blank=True)  # Google Maps link/embed
+    # WhatsApp click-to-chat: the destination number (international format, any
+    # punctuation is stripped when building the wa.me link) and an optional
+    # prefilled message. When the number is blank the floating bubble is hidden.
+    whatsapp_number = models.CharField(max_length=40, blank=True)
+    whatsapp_message = models.CharField(max_length=280, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

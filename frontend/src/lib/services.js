@@ -28,8 +28,18 @@ export const createBooking = (payload) =>
 export const cancelBooking = (id) =>
   api.post(`/bookings/${id}/cancel/`).then((r) => r.data);
 
+// Request a reschedule (new date/time) on an existing booking — goes to the
+// admin for review; nothing changes until they approve.
+export const requestBookingChange = (id, payload) =>
+  api.post(`/bookings/${id}/request-change/`, payload).then((r) => r.data);
+
 export const updateProfile = (payload) =>
   api.patch('/auth/me/', payload).then((r) => r.data);
+
+// Propose an edit to the member's package schedule (days per package) — goes to
+// the admin for review; nothing changes until they approve.
+export const requestScheduleChange = (payload) =>
+  api.post('/schedule-change/', payload).then((r) => r.data);
 
 /* ============================ Admin ============================ */
 export const adminDashboard = () => api.get('/admin/dashboard/').then((r) => r.data);
@@ -45,6 +55,10 @@ export const adminUserMembership = (id) =>
   api.get(`/admin/users/${id}/membership/`).then((r) => r.data);
 export const adminSetUserMembership = (id, payload) =>
   api.post(`/admin/users/${id}/set-membership/`, payload).then((r) => r.data);
+export const adminApproveScheduleChange = (id) =>
+  api.post(`/admin/users/${id}/approve-schedule-change/`).then((r) => r.data);
+export const adminRejectScheduleChange = (id) =>
+  api.post(`/admin/users/${id}/reject-schedule-change/`).then((r) => r.data);
 export const adminClients = () => api.get('/admin/clients/').then((r) => r.data);
 
 // Reservations
@@ -54,6 +68,10 @@ export const adminApproveReservation = (id) =>
   api.post(`/admin/reservations/${id}/approve/`).then((r) => r.data);
 export const adminCancelReservation = (id) =>
   api.post(`/admin/reservations/${id}/cancel/`).then((r) => r.data);
+export const adminApproveChange = (id) =>
+  api.post(`/admin/reservations/${id}/approve-change/`).then((r) => r.data);
+export const adminRejectChange = (id) =>
+  api.post(`/admin/reservations/${id}/reject-change/`).then((r) => r.data);
 export const adminTogglePaid = (id) =>
   api.post(`/admin/reservations/${id}/toggle-paid/`).then((r) => r.data);
 export const adminEditReservation = (id, payload) =>

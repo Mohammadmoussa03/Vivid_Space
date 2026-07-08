@@ -1,11 +1,13 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import logoColor from '../assets/vividspace-logo.png';
 import { useAuth } from '../context/AuthContext';
-import { MS, TONES, useVW, apiError, buildCalendar } from '../lib/ms';
+import { MS, TONES, useVW, apiError, buildCalendar, fmtDate } from '../lib/ms';
 import {
   adminDashboard, adminUsers, adminApproveUser, adminRejectUser, adminSetUserActive,
-  adminUserMembership, adminSetUserMembership,
+  adminUserMembership, adminSetUserMembership, adminApproveScheduleChange, adminRejectScheduleChange,
   adminReservations, adminApproveReservation, adminCancelReservation, adminTogglePaid,
+  adminApproveChange, adminRejectChange,
   adminSpaces, adminCreateSpace, adminUpdateSpace, adminToggleSpace, adminDeleteSpace,
   adminPackages, adminCreatePackage, adminUpdatePackage, adminDeletePackage,
   adminDuplicatePackage, adminToggleArchivePackage, adminCategories,
@@ -88,7 +90,7 @@ export default function Admin() {
         ? { position: 'fixed', top: 0, left: 0, width: 246, height: '100vh', zIndex: 80, background: '#fff', borderRight: `1px solid ${MS.line}`, display: 'flex', flexDirection: 'column', transform: drawer ? 'translateX(0)' : 'translateX(-100%)', transition: 'transform 260ms ease-out', boxShadow: drawer ? '0 20px 60px rgba(20,18,16,0.28)' : 'none' }
         : { flex: '0 0 246px', background: '#fff', borderRight: `1px solid ${MS.line}`, display: 'flex', flexDirection: 'column', position: 'sticky', top: 0, height: '100vh' }}>
         <div style={{ padding: '22px 24px', borderBottom: `1px solid ${MS.line}`, display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontFamily: MS.serif, fontWeight: 800, fontSize: 24, letterSpacing: '-0.01em' }}>VIVIDSPACE</span>
+          <img src={logoColor} alt="VividSpace" style={{ height: 42, width: 'auto', display: 'block' }} />
           <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: MS.accent, background: 'rgba(155,126,189,0.14)', padding: '3px 8px', borderRadius: 6 }}>Admin</span>
         </div>
         <nav className="adm-scroll" style={{ flex: 1, overflowY: 'auto', padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -232,19 +234,52 @@ function Users({ query }) {
   const [rows, reload] = useData(() => adminUsers());
   const [filter, setFilter] = useState('All');
   const [customizeUser, setCustomizeUser] = useState(null);
+  const [reviewUser, setReviewUser] = useState(null);   // member whose schedule-change review modal is open
   if (!rows) return <Empty text="Loading users…" />;
-  const act = (fn) => (id) => fn(id).then(reload).catch(() => {});
+  const act = (fn) => (id) => fn(id).then(reload).catch((e) => window.alert(apiError(e) || 'Action failed.'));
   const approve = act(adminApproveUser), reject = act(adminRejectUser);
+  const approveSchedule = act(adminApproveScheduleChange), rejectSchedule = act(adminRejectScheduleChange);
   const toggle = (u) => adminSetUserActive(u.id, !u.is_active).then(reload).catch(() => {});
-  const filtered = rows.filter((u) => (filter === 'All' || userStatus(u) === filter) && matches(u, query));
+  // Members with a package-schedule change awaiting the admin's decision.
+  const pendingSchedule = rows.filter((u) => u.schedule_change_requested);
+  const filtered = rows.filter((u) => {
+    if (filter === 'schedule') return u.schedule_change_requested && matches(u, query);
+    return (filter === 'All' || userStatus(u) === filter) && matches(u, query);
+  });
   // One fixed template shared by the header and every row so columns line up
   // regardless of how many action buttons a row shows (fixed-width Actions col).
   const cols = 'minmax(180px,2fr) minmax(110px,1.2fr) 110px 110px 250px';
 
   return (
     <>
+      {/* Prominent queue of pending package-schedule change requests. */}
+      {pendingSchedule.length > 0 && (
+        <div style={{ ...card, borderLeft: `4px solid ${MS.accent}`, padding: '18px 22px', marginBottom: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+            <span style={{ fontSize: 15.5, fontWeight: 700 }}>Package schedule change requests</span>
+            {pill(TONES.lilac.bg, TONES.lilac.color, `${pendingSchedule.length} awaiting review`)}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {pendingSchedule.map((u) => (
+              <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', justifyContent: 'space-between', background: MS.bg2, borderRadius: 12, padding: '12px 16px' }}>
+                <div style={{ minWidth: 0 }}>
+                  <p style={{ fontSize: 14.5, fontWeight: 600, margin: 0 }}>{u.full_name || u.email}</p>
+                  <p style={{ fontSize: 12.5, color: MS.muted, margin: '2px 0 0' }}>{u.plan || '—'} · {u.schedule_change_days || 0} day{u.schedule_change_days === 1 ? '' : 's'} requested</p>
+                </div>
+                <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+                  <button onClick={() => setReviewUser(u)} style={smallBtn()}>Review</button>
+                  <button onClick={() => approveSchedule(u.id)} style={smallBtn('green')}>Approve</button>
+                  <button onClick={() => rejectSchedule(u.id)} style={smallBtn('danger')}>Reject</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap', marginBottom: 20 }}>
         {['All', 'Active', 'Pending', 'Deactivated'].map((f) => <FilterPill key={f} label={f} active={filter === f} onClick={() => setFilter(f)} />)}
+        {pendingSchedule.length > 0 && <FilterPill label={`Schedule changes (${pendingSchedule.length})`} active={filter === 'schedule'} onClick={() => setFilter('schedule')} />}
       </div>
       <div style={{ ...card, overflowX: 'auto' }}>
        <div style={{ minWidth: 760 }}>
@@ -264,10 +299,19 @@ function Users({ query }) {
                   <p style={{ fontSize: 12.5, color: MS.faint, margin: '1px 0 0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{u.email}</p>
                 </div>
               </div>
-              <span style={{ fontSize: 14 }}>{u.plan || '—'}</span>
+              <span style={{ fontSize: 14, minWidth: 0 }}>
+                {u.plan || '—'}
+                {u.schedule_change_requested && <span style={{ marginLeft: 8, display: 'inline-block' }}>{pill(TONES.lilac.bg, TONES.lilac.color, `Schedule change${u.schedule_change_days ? ` · ${u.schedule_change_days}d` : ''}`)}</span>}
+              </span>
               <span>{pill(tone.bg, tone.color, status)}</span>
               <span style={{ fontSize: 14, color: MS.muted }}>{new Date(u.date_joined).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
               <div style={{ display: 'flex', gap: 7, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                {u.schedule_change_requested && (
+                  <>
+                    <button onClick={() => approveSchedule(u.id)} style={smallBtn('green')}>Approve change</button>
+                    <button onClick={() => rejectSchedule(u.id)} style={smallBtn('danger')}>Reject</button>
+                  </>
+                )}
                 {pending ? (
                   <>
                     <button onClick={() => approve(u.id)} style={smallBtn('green')}>Approve</button>
@@ -286,7 +330,94 @@ function Users({ query }) {
       {customizeUser && (
         <CustomizeModal user={customizeUser} onClose={(changed) => { setCustomizeUser(null); if (changed) reload(); }} />
       )}
+      {reviewUser && (
+        <ScheduleReviewModal user={reviewUser} onClose={() => setReviewUser(null)}
+          onResolved={() => { setReviewUser(null); reload(); }} />
+      )}
     </>
+  );
+}
+
+/* Review a member's proposed package-schedule change: current vs requested days
+   per package, so the admin can approve or reject with full context. */
+function ScheduleReviewModal({ user, onClose, onResolved }) {
+  const [ms, setMs] = useState(null);   // null while loading, {} on error
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    adminUserMembership(user.id)
+      .then((d) => setMs(d?.membership || {}))
+      .catch((e) => { setErr(apiError(e, 'Could not load this request.')); setMs({}); });
+    const onKey = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [user.id, onClose]);
+
+  const decide = (fn) => { setBusy(true); setErr(''); fn(user.id).then(onResolved).catch((e) => { setErr(apiError(e, 'Action failed.')); setBusy(false); }); };
+
+  // Map each package name -> {current: [dates], requested: [dates]} for a diff view.
+  const norm = (list) => (list || []).filter((c) => c && !c.lifetime && c.name);
+  const current = norm(ms?.custom_components);
+  const requested = norm(ms?.pending_components);
+  const names = Array.from(new Set([...current, ...requested].map((c) => c.name)));
+  const datesFor = (list, name) => (list.find((c) => c.name === name)?.dates || []).map(String).sort();
+
+  const col = (title, list) => (
+    <div style={{ flex: '1 1 220px', minWidth: 0 }}>
+      <p style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: MS.faint, fontWeight: 600, margin: '0 0 10px' }}>{title}</p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {names.map((name, i) => {
+          const ds = datesFor(list, name);
+          return (
+            <div key={name} style={{ ...card, padding: '12px 14px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: ds.length ? 8 : 0 }}>
+                <span style={{ width: 10, height: 10, borderRadius: 9999, background: ALLOC_COLORS[i % ALLOC_COLORS.length], flex: '0 0 auto' }} />
+                <span style={{ fontSize: 14, fontWeight: 600 }}>{name}</span>
+                <span style={{ fontSize: 12.5, color: MS.faint, marginLeft: 'auto' }}>{ds.length} day{ds.length === 1 ? '' : 's'}</span>
+              </div>
+              {ds.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                  {ds.map((d) => <span key={d} style={{ fontSize: 11.5, color: '#3A362F', background: MS.line2, padding: '3px 8px', borderRadius: 7, whiteSpace: 'nowrap' }}>{fmtDate(d)}</span>)}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(20,18,16,0.62)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 'clamp(14px,4vw,40px)', animation: 'ms-fade 200ms ease-out both' }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: MS.panel, width: 'min(720px, 100%)', maxHeight: '90vh', overflowY: 'auto', borderRadius: 20, padding: 'clamp(24px,4vw,32px)', boxShadow: '0 30px 80px rgba(20,18,16,0.32)' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 18 }}>
+          <div>
+            <h3 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 22, margin: 0 }}>Schedule change request</h3>
+            <p style={{ fontSize: 13, color: MS.faint, margin: '3px 0 0' }}>{user.full_name || user.email}{ms?.display_name ? ` · ${ms.display_name}` : ''}</p>
+          </div>
+          <button onClick={onClose} aria-label="Close" style={{ width: 36, height: 36, flex: '0 0 auto', borderRadius: 9999, border: `1px solid ${MS.line}`, background: '#fff', color: MS.ink, fontSize: 16, cursor: 'pointer' }}>✕</button>
+        </div>
+
+        {err && <p style={{ background: 'rgba(168,90,74,0.12)', color: MS.red, fontSize: 13.5, fontWeight: 500, padding: '11px 14px', borderRadius: 10, margin: '0 0 16px' }}>{err}</p>}
+        {ms === null ? (
+          <p style={{ color: MS.faint, fontSize: 14, padding: '24px 0' }}>Loading…</p>
+        ) : !requested.length && !current.length ? (
+          <p style={{ color: MS.faint, fontSize: 14 }}>No schedule details to show.</p>
+        ) : (
+          <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+            {col('Current schedule', current)}
+            {col('Requested schedule', requested)}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 24 }}>
+          <button onClick={() => decide(adminApproveScheduleChange)} disabled={busy} style={{ ...smallBtn('green'), padding: '11px 22px', fontSize: 14, opacity: busy ? 0.6 : 1 }}>Approve change</button>
+          <button onClick={() => decide(adminRejectScheduleChange)} disabled={busy} style={{ ...smallBtn('danger'), padding: '11px 22px', fontSize: 14, opacity: busy ? 0.6 : 1 }}>Reject</button>
+          <button onClick={onClose} style={{ ...smallBtn(), padding: '11px 22px', fontSize: 14, marginLeft: 'auto' }}>Cancel</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -574,9 +705,10 @@ function CustomizeModal({ user, onClose }) {
 function Reservations({ query }) {
   const [filter, setFilter] = useState('all');
   const [rows, reload] = useData(() => adminReservations(filter === 'all' ? '' : filter), [filter]);
-  const act = (fn) => (id) => fn(id).then(reload).catch(() => {});
+  const act = (fn) => (id) => fn(id).then(reload).catch((e) => window.alert(apiError(e) || 'Action failed.'));
   const approve = act(adminApproveReservation), cancel = act(adminCancelReservation), pay = act(adminTogglePaid);
-  const FILTERS = [['all', 'All'], ['pending', 'Pending'], ['confirmed', 'Confirmed'], ['cancelled', 'Cancelled'], ['past', 'Past']];
+  const approveChange = act(adminApproveChange), rejectChange = act(adminRejectChange);
+  const FILTERS = [['all', 'All'], ['pending', 'Pending'], ['change', 'Change requests'], ['confirmed', 'Confirmed'], ['cancelled', 'Cancelled'], ['past', 'Past']];
   // Shared fixed template — identical for header + every row. The Actions column
   // is a fixed width (fits Approve + Mark paid + Cancel) so button count never
   // shifts the other columns.
@@ -601,13 +733,25 @@ function Reservations({ query }) {
                 <span style={{ fontSize: 13, color: MS.muted, fontVariantNumeric: 'tabular-nums' }}>MS-{r.id}</span>
                 <span style={{ fontSize: 14, fontWeight: 500, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.client}</span>
                 <span style={{ fontSize: 14 }}>{r.space_label}</span>
-                <span style={{ fontSize: 13.5, color: MS.muted }}>{r.date_label}</span>
+                <span style={{ fontSize: 13.5, color: MS.muted }}>
+                  {r.date_label}
+                  {r.change_requested && r.requested_label && <span style={{ display: 'block', color: MS.accent, fontWeight: 600, fontSize: 12.5, marginTop: 2 }}>→ {r.requested_label}</span>}
+                </span>
                 <span>{pill(payTone.bg, payTone.color, payText)}</span>
                 <span>{pill(r.status_bg, r.status_color, r.status_label)}</span>
                 <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-                  {r.pending && <button onClick={() => approve(r.id)} style={smallBtn('green')}>Approve</button>}
-                  {!r.is_paid && !r.is_free && <button onClick={() => pay(r.id)} style={smallBtn()}>Mark paid</button>}
-                  {r.cancellable && <button onClick={() => cancel(r.id)} style={smallBtn('danger')}>Cancel</button>}
+                  {r.change_requested ? (
+                    <>
+                      <button onClick={() => approveChange(r.id)} style={smallBtn('green')}>Approve</button>
+                      <button onClick={() => rejectChange(r.id)} style={smallBtn('danger')}>Reject</button>
+                    </>
+                  ) : (
+                    <>
+                      {r.pending && <button onClick={() => approve(r.id)} style={smallBtn('green')}>Approve</button>}
+                      {!r.is_paid && !r.is_free && <button onClick={() => pay(r.id)} style={smallBtn()}>Mark paid</button>}
+                      {r.cancellable && <button onClick={() => cancel(r.id)} style={smallBtn('danger')}>Cancel</button>}
+                    </>
+                  )}
                 </div>
               </div>
             );
@@ -785,14 +929,16 @@ function Tours({ query, onEdit, modalClosed }) {
 /* ---------------- Custom package requests ---------------- */
 function Customizations({ query, onEdit, modalClosed }) {
   const [rows, reload] = useData(adminCustomizations);
+  const [detail, setDetail] = useState(null);   // request whose full breakdown modal is open
   useEffect(() => { if (modalClosed === null) reload(); }, [modalClosed]);
   if (!rows) return <Empty text="Loading custom requests…" />;
   const del = (id) => { if (window.confirm('Delete this request?')) adminDeleteCustomization(id).then(reload).catch(() => {}); };
   const filtered = rows.filter((c) => matches(c, query));
-  const summary = (items) => (items || []).map((it) => `${it.office} · ${(it.dates || []).length}d`).join(', ') || '—';
-  const datesTip = (items) => (items || []).map((it) => `${it.office}: ${(it.dates || []).join(', ')}`).join('\n');
-  // Shared fixed template — Actions fits Update + Delete.
-  const cols = 'minmax(150px,1.3fr) minmax(170px,1.6fr) minmax(190px,1.9fr) 70px 110px 150px';
+  const timeOf = (it) => (it.duration === 'hourly' && it.start_time) ? `${it.start_time}·${it.hours || 1}h` : 'full day';
+  const summary = (items) => (items || []).map((it) => `${it.office} · ${(it.dates || []).length}d · ${timeOf(it)}`).join(', ') || '—';
+  const datesTip = (items) => (items || []).map((it) => `${it.office} [${timeOf(it)}]: ${(it.dates || []).join(', ')}`).join('\n');
+  // Shared fixed template — Actions fits Details + Update + Delete.
+  const cols = 'minmax(150px,1.3fr) minmax(170px,1.6fr) minmax(190px,1.9fr) 70px 110px 230px';
   return (
     <div style={{ ...card, overflowX: 'auto' }}>
       <div style={{ minWidth: 900 }}>
@@ -812,16 +958,83 @@ function Customizations({ query, onEdit, modalClosed }) {
                 <p style={{ fontSize: 13.5, color: MS.muted, margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.email}</p>
                 {c.phone ? <p style={{ fontSize: 12.5, color: MS.faint, margin: '1px 0 0' }}>{c.phone}</p> : null}
               </div>
-              <span title={datesTip(c.items)} style={{ fontSize: 13.5, color: '#3A362F', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{summary(c.items)}</span>
+              <button onClick={() => setDetail(c)} title="View full breakdown" style={{ textAlign: 'left', background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 13.5, color: MS.accent, fontWeight: 600, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{summary(c.items)}</button>
               <span style={{ fontSize: 14, fontWeight: 600 }}>{c.total_days}</span>
               <span>{pill(tone.bg, tone.color, c.status_label)}</span>
               <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                <button onClick={() => setDetail(c)} style={smallBtn()}>Details</button>
                 <button onClick={() => onEdit(c)} style={smallBtn()}>Update</button>
                 <button onClick={() => del(c.id)} style={smallBtn('danger')}>Delete</button>
               </div>
             </div>
           );
         })}
+      </div>
+      {detail && <CustomizationDetailModal req={detail} onClose={() => setDetail(null)} />}
+    </div>
+  );
+}
+
+/* Full breakdown of one custom request — everything the visitor sent, so large
+   day/office mixes that don't fit the table row are fully readable here. */
+function CustomizationDetailModal({ req, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  const timeOf = (it) => (it.duration === 'hourly' && it.start_time) ? `${it.start_time} · ${it.hours || 1} hr${(it.hours || 1) > 1 ? 's' : ''}` : 'Full day';
+  const items = req.items || [];
+  const tone = TONES[TOUR_TONE[req.status] || 'neutral'];
+  const fact = (k, v) => v ? (
+    <div style={{ display: 'flex', gap: 10, fontSize: 14 }}>
+      <span style={{ flex: '0 0 88px', color: MS.faint }}>{k}</span>
+      <span style={{ color: MS.ink, wordBreak: 'break-word' }}>{v}</span>
+    </div>
+  ) : null;
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(20,18,16,0.62)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 'clamp(14px,4vw,40px)', animation: 'ms-fade 200ms ease-out both' }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: MS.panel, width: 'min(620px, 100%)', maxHeight: '90vh', overflowY: 'auto', borderRadius: 20, padding: 'clamp(24px,4vw,32px)', boxShadow: '0 30px 80px rgba(20,18,16,0.32)' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 16 }}>
+          <div style={{ minWidth: 0 }}>
+            <h3 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 22, margin: 0 }}>{req.name}</h3>
+            <p style={{ fontSize: 13, color: MS.faint, margin: '3px 0 0' }}>Custom package request · {req.total_days} day{req.total_days === 1 ? '' : 's'} across {items.length} office{items.length === 1 ? '' : 's'}</p>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '0 0 auto' }}>
+            {pill(tone.bg, tone.color, req.status_label)}
+            <button onClick={onClose} aria-label="Close" style={{ width: 36, height: 36, borderRadius: 9999, border: `1px solid ${MS.line}`, background: '#fff', color: MS.ink, fontSize: 16, cursor: 'pointer' }}>✕</button>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+          {fact('Email', req.email)}
+          {fact('Phone', req.phone)}
+          {fact('Notes', req.details)}
+        </div>
+
+        <p style={{ fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', color: MS.faint, fontWeight: 600, margin: '0 0 12px' }}>Requested schedule</p>
+        {items.length === 0 && <p style={{ color: MS.faint, fontSize: 14 }}>No days were assigned.</p>}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {items.map((it, i) => {
+            const dates = (it.dates || []).slice().sort();
+            const col = ALLOC_COLORS[i % ALLOC_COLORS.length];
+            return (
+              <div key={i} style={{ ...card, padding: '14px 16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+                  <span style={{ width: 11, height: 11, borderRadius: 9999, background: col, flex: '0 0 auto' }} />
+                  <span style={{ fontSize: 15, fontWeight: 600 }}>{it.office}</span>
+                  <span style={{ fontSize: 12.5, color: MS.muted, background: MS.line2, padding: '3px 10px', borderRadius: 9999 }}>{timeOf(it)}</span>
+                  <span style={{ fontSize: 12.5, color: MS.faint }}>{dates.length} day{dates.length === 1 ? '' : 's'}</span>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {dates.map((d) => (
+                    <span key={d} style={{ fontSize: 12.5, color: '#3A362F', background: MS.line2, padding: '4px 10px', borderRadius: 8, whiteSpace: 'nowrap' }}>{fmtDate(d)}</span>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
@@ -894,6 +1107,8 @@ function Content() {
       { name: 'phones', label: 'Phone numbers (one per line)', type: 'list' },
       { name: 'address', label: 'Address', type: 'text' },
       { name: 'maps_url', label: 'Google Maps URL', type: 'text' },
+      { name: 'whatsapp_number', label: 'WhatsApp number (e.g. +961 70 123 456 — blank hides the bubble)', type: 'text' },
+      { name: 'whatsapp_message', label: 'WhatsApp prefilled message (optional)', type: 'text' },
     ] },
     hours: { title: 'Business hours', save: saveSettings, initial: settings, fields: [
       { name: 'center_name', label: 'Center name', type: 'text' },

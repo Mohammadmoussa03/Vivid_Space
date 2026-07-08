@@ -12,6 +12,7 @@ User = get_user_model()
 STATUS_STYLES = {
     'confirmed': ('rgba(46,115,224,.16)', '#6BA4F5', 'Confirmed'),
     'pending': ('rgba(240,130,46,.16)', '#F3A35E', 'Pending'),
+    'change': ('rgba(155,126,189,.18)', '#9B7EBD', 'Change requested'),
     'completed': ('rgba(255,255,255,.07)', 'rgba(255,255,255,.6)', 'Completed'),
     'cancelled': ('rgba(226,58,75,.14)', '#F06A78', 'Cancelled'),
 }
@@ -20,18 +21,32 @@ STATUS_STYLES = {
 class AdminUserSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(read_only=True)
     plan = serializers.SerializerMethodField()
+    schedule_change_requested = serializers.SerializerMethodField()
+    schedule_change_days = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = (
             'id', 'uuid', 'email', 'first_name', 'last_name', 'company', 'full_name',
             'role', 'is_approved', 'is_active', 'date_joined', 'plan',
+            'schedule_change_requested', 'schedule_change_days',
         )
         read_only_fields = fields
 
     def get_plan(self, obj):
         membership = getattr(obj, 'membership', None)
         return membership.display_name if membership else None
+
+    def get_schedule_change_requested(self, obj):
+        membership = getattr(obj, 'membership', None)
+        return bool(membership and membership.has_schedule_change)
+
+    def get_schedule_change_days(self, obj):
+        membership = getattr(obj, 'membership', None)
+        if not membership or not membership.has_schedule_change:
+            return 0
+        return sum(len(c.get('dates') or []) for c in (membership.pending_components or [])
+                   if isinstance(c, dict) and not c.get('lifetime'))
 
 
 class ClientSerializer(serializers.ModelSerializer):
@@ -102,6 +117,8 @@ class ReservationSerializer(serializers.ModelSerializer):
     status_bg = serializers.SerializerMethodField()
     status_color = serializers.SerializerMethodField()
     pending = serializers.BooleanField(source='is_pending', read_only=True)
+    change_requested = serializers.BooleanField(read_only=True)
+    requested_label = serializers.SerializerMethodField()
     cancellable = serializers.SerializerMethodField()
 
     class Meta:
@@ -109,7 +126,8 @@ class ReservationSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'client', 'company', 'space_label', 'duration', 'duration_label',
             'date', 'date_label', 'free', 'is_free', 'is_paid', 'status',
-            'status_label', 'status_bg', 'status_color', 'pending', 'cancellable',
+            'status_label', 'status_bg', 'status_color', 'pending',
+            'change_requested', 'requested_label', 'cancellable',
         )
 
     free = serializers.BooleanField(source='is_free', read_only=True)
@@ -137,6 +155,18 @@ class ReservationSerializer(serializers.ModelSerializer):
 
     def get_status_color(self, obj):
         return STATUS_STYLES[obj.reservation_status][1]
+
+    def get_requested_label(self, obj):
+        """The member's proposed new date/time, e.g. 'Aug 11 · 14:00'."""
+        if not obj.change_requested or not obj.requested_date:
+            return ''
+        d = obj.requested_date
+        label = f'{MONTHS[d.month - 1]} {d.day:02d}'
+        if obj.duration == Booking.Duration.HOURLY and obj.requested_start_time:
+            label += f' · {obj.requested_start_time.strftime("%H:%M")}'
+        else:
+            label += ' · Full day'
+        return label
 
     def get_cancellable(self, obj):
         return not obj.is_cancelled and not obj.is_past
@@ -222,7 +252,8 @@ class AdminSettingsSerializer(serializers.ModelSerializer):
         fields = (
             'allow_sameday', 'auto_approve', 'pay_at_center', 'sameday_cutoff',
             'center_name', 'opening_hours', 'business_hours', 'notification_email',
-            'contact_email', 'phones', 'address', 'maps_url', 'updated_at',
+            'contact_email', 'phones', 'address', 'maps_url',
+            'whatsapp_number', 'whatsapp_message', 'updated_at',
         )
         read_only_fields = ('updated_at',)
 

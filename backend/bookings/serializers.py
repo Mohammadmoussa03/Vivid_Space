@@ -107,6 +107,8 @@ class BookingSerializer(serializers.ModelSerializer):
     free = serializers.BooleanField(source='is_free', read_only=True)
     status = serializers.CharField(source='status_label', read_only=True)
     when = serializers.CharField(read_only=True)
+    change_requested = serializers.BooleanField(read_only=True)
+    requested = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
@@ -114,6 +116,7 @@ class BookingSerializer(serializers.ModelSerializer):
             'id', 'mon', 'day', 'space', 'space_key', 'unit', 'date',
             'duration', 'start_time', 'end_time', 'time', 'cost',
             'attendees', 'free', 'status', 'when',
+            'change_requested', 'requested',
         )
 
     def get_mon(self, obj):
@@ -139,6 +142,22 @@ class BookingSerializer(serializers.ModelSerializer):
         if obj.when == 'past':
             return f'Paid {_money(obj.price)}'.strip() if obj.price else 'Paid'
         return 'Pay at center'
+
+    def get_requested(self, obj):
+        """The pending reschedule the member submitted, awaiting admin review."""
+        if not obj.change_requested or not obj.requested_date:
+            return None
+        d = obj.requested_date
+        if obj.duration == Booking.Duration.HOURLY and obj.requested_start_time:
+            time = obj.requested_start_time.strftime('%H:%M')
+        else:
+            time = 'Full day'
+        return {
+            'date': d.isoformat(),
+            'mon': MONTHS[d.month - 1],
+            'day': f'{d.day:02d}',
+            'time': time,
+        }
 
 
 def _slot_end(booking_date, start, hours):
@@ -305,12 +324,26 @@ class TourRequestCreateSerializer(serializers.ModelSerializer):
 
 
 class CustomizationItemSerializer(serializers.Serializer):
-    """One office in a bespoke package, with the days the visitor wants it."""
+    """One office in a bespoke package, with the days the visitor wants it and,
+    optionally, the time of day: a full day (default) or a specific start time
+    with a number of hours."""
 
     office = serializers.CharField(max_length=120)
     dates = serializers.ListField(
         child=serializers.DateField(), allow_empty=False, max_length=366,
     )
+    duration = serializers.ChoiceField(
+        choices=('fullday', 'hourly'), required=False, default='fullday',
+    )
+    start_time = serializers.TimeField(required=False, allow_null=True)
+    hours = serializers.IntegerField(required=False, min_value=1, max_value=12, allow_null=True)
+
+    def validate(self, attrs):
+        if attrs.get('duration') == 'hourly' and not attrs.get('start_time'):
+            raise serializers.ValidationError(
+                {'start_time': 'Pick a start time for an hourly office.'}
+            )
+        return attrs
 
 
 class CustomizationRequestSerializer(serializers.Serializer):
@@ -356,6 +389,8 @@ class MembershipSerializer(serializers.ModelSerializer):
     price_display = serializers.CharField(read_only=True)
     is_custom = serializers.BooleanField(read_only=True)
     display_name = serializers.CharField(read_only=True)
+    schedule_change_requested = serializers.BooleanField(read_only=True)
+    pending_components = serializers.JSONField(read_only=True)
 
     class Meta:
         model = Membership
@@ -364,4 +399,5 @@ class MembershipSerializer(serializers.ModelSerializer):
             'effective_hours', 'guest_passes_used', 'guest_passes_left',
             'custom_components', 'custom_price', 'custom_price_label',
             'custom_plan_name', 'display_name', 'price_display', 'is_custom', 'plan',
+            'schedule_change_requested', 'pending_components',
         )
