@@ -854,7 +854,7 @@ def _notify_owner_of_change_request(booking):
         f'Space:   {booking.space.name}{unit}\n\n'
         f'Current:   {current}\n'
         f'Requested: {requested}\n\n'
-        f'Review it in the admin panel under Reservations → Change requests to '
+        f'Review it in the admin panel under Daily Bookings → Change requests to '
         f'approve or reject.\n'
     )
     try:

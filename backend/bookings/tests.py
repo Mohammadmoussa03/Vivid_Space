@@ -346,6 +346,8 @@ class ChangeRequestTests(BookingTestBase):
         self.assertEqual(len(mail.outbox), 1)
         self.assertNotIn('m@example.com', mail.outbox[0].to)
         self.assertIn('change request', mail.outbox[0].subject.lower())
+        # The email must point at a menu that actually exists in the admin panel.
+        self.assertIn('Daily Bookings → Change requests', mail.outbox[0].body)
 
     def test_locked_booking_cannot_be_cancelled(self):
         self.request_change()
@@ -1011,3 +1013,6 @@ class WhishOrderTests(APITestCase):
         resp = self.admin_client.get('/api/admin/reservations/export/')
         self.assertEqual(resp.status_code, 200)
         self.assertIn('spreadsheet', resp['Content-Type'])
+        # The download is named for what the admin sees, not the legacy route.
+        self.assertIn('daily-bookings', resp['Content-Disposition'])
+        self.assertNotIn('reservations', resp['Content-Disposition'])

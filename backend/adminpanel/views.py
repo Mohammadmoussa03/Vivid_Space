@@ -401,7 +401,7 @@ class AdminReservationViewSet(viewsets.ModelViewSet):
                 b.order.order_number if b.order else '',
                 timezone.localtime(b.created_at).strftime('%Y-%m-%d %H:%M'),
             ])
-        return _xlsx_response('reservations', headers, rows)
+        return _xlsx_response('daily-bookings', headers, rows)
 
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):

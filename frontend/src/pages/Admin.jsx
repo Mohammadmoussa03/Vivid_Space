@@ -734,7 +734,7 @@ function Reservations({ query }) {
     <>
       <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap', alignItems: 'center', marginBottom: 20 }}>
         {FILTERS.map(([k, l]) => <FilterPill key={k} label={l} active={filter === k} onClick={() => setFilter(k)} />)}
-        <button onClick={() => exportXlsx(() => adminExportReservations(filter), 'reservations')} style={{ ...smallBtn('green'), marginLeft: 'auto' }}>⭳ Export Excel</button>
+        <button onClick={() => exportXlsx(() => adminExportReservations(filter), 'daily-bookings')} style={{ ...smallBtn('green'), marginLeft: 'auto' }}>⭳ Export Excel</button>
       </div>
       <div style={{ ...card, overflowX: 'auto' }}>
         <div style={{ minWidth: 1040 }}>
