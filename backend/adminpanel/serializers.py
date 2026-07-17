@@ -1,3 +1,5 @@
+import re
+
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
@@ -393,6 +395,17 @@ class AdminSettingsSerializer(serializers.ModelSerializer):
             'updated_at',
         )
         read_only_fields = ('updated_at',)
+
+    def validate_sameday_cutoff(self, value):
+        """Keep the field to real "HH:MM" (or blank). It used to be free text
+        defaulting to a sentence, which the booking rules could never read."""
+        value = (value or '').strip()
+        if not value:
+            return ''   # no cutoff
+        if not re.match(r'^([01]\d|2[0-3]):[0-5]\d$', value):
+            raise serializers.ValidationError(
+                'Use a 24-hour time like 14:00, or leave it blank for no cutoff.')
+        return value
 
     def validate_maps_url(self, value):
         # Rendered in an <a href> / <iframe src> on the public homepage — must

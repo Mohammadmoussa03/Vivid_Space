@@ -284,6 +284,23 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         if booking_date < today:
             raise serializers.ValidationError({'date': 'Pick a date in the future.'})
 
+        # Center-wide same-day rules (admin → Booking rules).
+        if booking_date == today:
+            admin_settings = AdminSettings.load()
+            if not admin_settings.allow_sameday:
+                raise serializers.ValidationError(
+                    {'date': 'Same-day bookings aren\'t available — please pick a later date.'}
+                )
+            # A cutoff caps how late in the day a same-day booking may be *made*
+            # (not the slot itself). Blank means no cutoff.
+            cutoff = (admin_settings.sameday_cutoff or '').strip()
+            if cutoff:
+                cutoff_min = _hhmm_to_minutes(cutoff, None)
+                if cutoff_min is not None and now.hour * 60 + now.minute >= cutoff_min:
+                    raise serializers.ValidationError(
+                        {'date': f'Same-day bookings close at {cutoff} — please pick a later date.'}
+                    )
+
         if duration == Booking.Duration.HOURLY:
             start = attrs.get('start_time')
             if not start:
@@ -386,12 +403,27 @@ class BookingCreateSerializer(serializers.ModelSerializer):
                     validated_data['is_free'] = True
                     validated_data['price'] = None
             validated_data['free_hours_used'] = deducted
+            admin_settings = AdminSettings.load()
+
+            # "Pay at center" off → money must be taken online, so the direct
+            # booking endpoint can't settle a priced slot. Checked here rather
+            # than in validate() because only now do we know what's actually
+            # payable: a free space, or one fully covered by the member's plan
+            # hours, costs nothing and is never affected. The Whish order flow
+            # sets `via_order` — it *is* the online payment.
+            payable = not validated_data['is_free'] and (validated_data['price'] or 0) > 0
+            if payable and not admin_settings.pay_at_center and not self.context.get('via_order'):
+                raise serializers.ValidationError(
+                    {'detail': 'This booking has to be paid online — '
+                               'choose the online payment option to confirm it.'}
+                )
+
             # The admin's "Auto-approve bookings" switch decides whether a new
             # booking is live immediately or has to be vetted first. Off → the
             # slot is held as pending and only an admin's Approve confirms it.
             # (The Whish order flow overrides this to pending regardless, since
             # its slot is held until the transfer is verified.)
-            validated_data['is_pending'] = not AdminSettings.load().auto_approve
+            validated_data['is_pending'] = not admin_settings.auto_approve
             return super().create(validated_data)
 
     def to_representation(self, instance):

@@ -701,10 +701,16 @@ class SiteContent(models.Model):
 class AdminSettings(models.Model):
     """Singleton holding center-wide booking rules and details."""
 
+    # Whether a member can book today at all.
     allow_sameday = models.BooleanField(default=True)
     auto_approve = models.BooleanField(default=False)
+    # Whether a priced booking may be settled at the center. Off → it must be paid
+    # online (Whish). Free / plan-covered bookings are never affected.
     pay_at_center = models.BooleanField(default=True)
-    sameday_cutoff = models.CharField(max_length=60, default='No cutoff — allow any time')
+    # Latest clock time a same-day booking may be *made*, as "HH:MM" (the same
+    # string shape as business_hours). Blank = no cutoff. Only applies when
+    # allow_sameday is on.
+    sameday_cutoff = models.CharField(max_length=5, blank=True, default='')
     center_name = models.CharField(max_length=120, default='Vivid Space — Hudson St')
     opening_hours = models.CharField(max_length=120, default='Mon–Fri 7am–9pm · Members 24/7')
     # Structured business hours used by the availability endpoint. Shape:

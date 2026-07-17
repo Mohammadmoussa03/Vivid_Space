@@ -241,6 +241,143 @@ class AutoApproveTests(APITestCase):
         self.assertEqual(len(mail.outbox), 0)
 
 
+class SameDayRuleTests(APITestCase):
+    """The "Allow same-day bookings" switch and its cutoff must gate today."""
+
+    def setUp(self):
+        self.space = Space.objects.create(
+            key='room', name='Room', is_free=False, uses_free_hours=False,
+            durations=['hourly', 'fullday'], units=1, hour_price=40, day_price=200)
+        self.member = User.objects.create_user(
+            email='m@example.com', password='pw12345678', is_approved=True)
+        self.client.force_authenticate(self.member)
+        self.now = timezone.localtime()
+
+    def _rules(self, allow, cutoff=''):
+        s = AdminSettings.load()
+        s.allow_sameday = allow
+        s.sameday_cutoff = cutoff
+        s.auto_approve = True
+        s.save()
+
+    def _book_today(self):
+        if self.now.hour >= 17:
+            self.skipTest('No future slot left today.')
+        return self.client.post('/api/bookings/', {
+            'space': 'room', 'date': timezone.localdate().isoformat(),
+            'duration': 'hourly', 'start_time': f'{self.now.hour + 1:02d}:00',
+            'hours': 1}, format='json')
+
+    def _book_tomorrow(self):
+        return self.client.post('/api/bookings/', {
+            'space': 'room', 'date': (timezone.localdate() + timedelta(days=1)).isoformat(),
+            'duration': 'hourly', 'start_time': '10:00', 'hours': 1}, format='json')
+
+    def test_switch_on_allows_today(self):
+        self._rules(True)
+        self.assertEqual(self._book_today().status_code, 201)
+
+    def test_switch_off_refuses_today(self):
+        self._rules(False)
+        r = self._book_today()
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('same-day', str(r.data).lower())
+
+    def test_switch_off_still_allows_a_later_date(self):
+        """The switch gates today only — it must not block normal bookings."""
+        self._rules(False)
+        self.assertEqual(self._book_tomorrow().status_code, 201)
+
+    def test_cutoff_already_passed_refuses_today(self):
+        # A cutoff of 00:01 is in the past for any run after midnight.
+        self._rules(True, cutoff='00:01')
+        r = self._book_today()
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('00:01', str(r.data))
+
+    def test_cutoff_not_yet_reached_allows_today(self):
+        self._rules(True, cutoff='23:59')
+        self.assertEqual(self._book_today().status_code, 201)
+
+    def test_cutoff_does_not_affect_later_dates(self):
+        self._rules(True, cutoff='00:01')
+        self.assertEqual(self._book_tomorrow().status_code, 201)
+
+    def test_blank_cutoff_means_no_cutoff(self):
+        self._rules(True, cutoff='')
+        self.assertEqual(self._book_today().status_code, 201)
+
+
+class PayAtCenterTests(APITestCase):
+    """The "Allow paying at the center" switch must gate the direct booking path
+    for priced bookings only."""
+
+    def setUp(self):
+        self.paid = Space.objects.create(
+            key='paid', name='Paid Room', is_free=False, uses_free_hours=False,
+            durations=['hourly'], units=1, hour_price=40)
+        self.free = Space.objects.create(
+            key='freeroom', name='Free Room', is_free=True, uses_free_hours=False,
+            durations=['hourly'], units=1)
+        self.member = User.objects.create_user(
+            email='m@example.com', password='pw12345678', is_approved=True)
+        self.client.force_authenticate(self.member)
+        self.day = (timezone.localdate() + timedelta(days=1)).isoformat()
+        s = AdminSettings.load()
+        s.auto_approve = True
+        s.whish_enabled = True
+        s.whish_number = '+961 70 000 000'
+        s.save()
+
+    def _set_pac(self, on):
+        s = AdminSettings.load()
+        s.pay_at_center = on
+        s.save()
+
+    def _book(self, key, hour='10:00'):
+        return self.client.post('/api/bookings/', {
+            'space': key, 'date': self.day, 'duration': 'hourly',
+            'start_time': hour, 'hours': 1}, format='json')
+
+    def test_switch_on_allows_paying_at_center(self):
+        self._set_pac(True)
+        self.assertEqual(self._book('paid').status_code, 201)
+
+    def test_switch_off_refuses_a_priced_direct_booking(self):
+        self._set_pac(False)
+        r = self._book('paid')
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('paid online', str(r.data))
+
+    def test_switch_off_still_allows_a_free_space(self):
+        """The switch is about money — a free space has none to take."""
+        self._set_pac(False)
+        self.assertEqual(self._book('freeroom').status_code, 201)
+
+    def test_switch_off_still_allows_the_online_order_path(self):
+        """Whish *is* the online payment — it must not block itself."""
+        self._set_pac(False)
+        r = self.client.post('/api/orders/', {'payment_method': 'whish', 'bookings': [
+            {'space': 'paid', 'date': self.day, 'duration': 'hourly',
+             'start_time': '12:00', 'hours': 1}]}, format='json')
+        self.assertEqual(r.status_code, 201, r.data)
+
+    def test_switch_off_still_allows_a_plan_covered_booking(self):
+        """Covered by the member's free hours = nothing payable."""
+        plan = MembershipPlan.objects.create(name='P', room_hours=10)
+        Membership.objects.create(user=self.member, plan=plan,
+                                  hours_period=timezone.localdate().strftime('%Y-%m'))
+        room = Space.objects.create(
+            key='meet', name='Meet', is_free=False, uses_free_hours=True,
+            durations=['hourly'], units=1, hour_price=40)
+        self._set_pac(False)
+        self.assertEqual(self._book('meet').status_code, 201, room.key)
+
+    def test_site_payload_exposes_the_switch(self):
+        self._set_pac(False)
+        self.assertIs(self.client.get('/api/site/').data['payments']['pay_at_center'], False)
+
+
 class UnitLabelTests(APITestCase):
     """Every unit of a space must be reachable, and no booking may stay ambiguous
     once the space has more than one unit."""

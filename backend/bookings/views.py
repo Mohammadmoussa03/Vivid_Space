@@ -175,6 +175,9 @@ class SiteConfigView(APIView):
             'payments': {
                 # Whish is offered only when enabled AND a receiving number is set.
                 'whish_enabled': bool(s.whish_enabled and s.whish_number),
+                # Off → a priced booking can't be settled at the center, so the
+                # page must not offer a plain "Confirm booking" for one.
+                'pay_at_center': s.pay_at_center,
             },
         })
 
@@ -485,7 +488,10 @@ class OrderCreateView(APIView):
         # Validate every line up front so one bad slot aborts the whole order.
         sers = []
         for it in items:
-            s = BookingCreateSerializer(data=it, context={'request': request})
+            # via_order: this *is* the online payment path, so the "pay at center"
+            # switch must not block it.
+            s = BookingCreateSerializer(
+                data=it, context={'request': request, 'via_order': True})
             if not s.is_valid():
                 return Response(s.errors, status=status.HTTP_400_BAD_REQUEST)
             sers.append(s)

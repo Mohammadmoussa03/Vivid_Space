@@ -1348,8 +1348,9 @@ function Content() {
     ] },
     rules: { title: 'Booking rules', save: saveSettings, initial: settings, fields: [
       { name: 'allow_sameday', label: 'Allow same-day bookings', type: 'checkbox' },
-      { name: 'auto_approve', label: 'Auto-approve bookings', type: 'checkbox' },
-      { name: 'sameday_cutoff', label: 'Same-day cutoff (HH:MM)', type: 'text' },
+      { name: 'sameday_cutoff', label: 'Same-day cutoff (HH:MM — blank for no cutoff). Bookings for today stop being accepted after this time.', type: 'text' },
+      { name: 'auto_approve', label: 'Auto-approve bookings (off — every booking waits for your approval)', type: 'checkbox' },
+      { name: 'pay_at_center', label: 'Allow paying at the center (off — paid bookings must be paid online)', type: 'checkbox' },
     ] },
     whish: { title: 'Whish payment', save: saveSettings, initial: settings, fields: [
       { name: 'whish_enabled', label: 'Offer “Pay with Whish” at checkout', type: 'checkbox' },

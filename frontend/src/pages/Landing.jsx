@@ -738,7 +738,8 @@ export default function Landing() {
       {/* ===== MODALS ===== */}
       {pkgDetail && <PackageModal pkg={pkgDetail} onClose={() => setPkgDetail(null)} onContact={() => { setPkgDetail(null); scrollToContact(); }} />}
       {customizeOpen && <CustomizeModal offices={officeOptions} onClose={() => setCustomizeOpen(false)} />}
-      {bookingSpace && <BookingModal space={bookingSpace} whishEnabled={!!site?.payments?.whish_enabled} onClose={() => { setBookingSpace(null); refreshSpaces(); }} />}
+      {bookingSpace && <BookingModal space={bookingSpace} whishEnabled={!!site?.payments?.whish_enabled}
+        payAtCenter={site?.payments?.pay_at_center !== false} onClose={() => { setBookingSpace(null); refreshSpaces(); }} />}
       {authOpen && <AuthModal onClose={() => { setAuthOpen(false); setResetInfo(null); }} onAuthed={onAuthed} goDashboard={goDashboard} resetInfo={resetInfo} />}
       {dashOpen && <DashboardModal user={user} onClose={() => setDashOpen(false)} />}
 
@@ -1464,7 +1465,7 @@ function Centered({ icon, tone, title, body, action }) {
 /* ---------------- Booking modal (availability + create) ---------------- */
 const MAX_HOURS = 12;
 
-function BookingModal({ space, onClose, whishEnabled }) {
+function BookingModal({ space, onClose, whishEnabled, payAtCenter = true }) {
   const navigate = useNavigate();
   // Which modes this space allows: by the hour and/or by the day.
   const modes = (() => {
@@ -1580,8 +1581,6 @@ function BookingModal({ space, onClose, whishEnabled }) {
   const coveredByFree = usesFree && freeLeft >= hours;
   const notEnoughFree = usesFree && freeLeft < hours;
 
-  const canConfirm = !overCap && unitOk && !notEnoughFree && (isHourly ? (!!date && !!slot) : dayCount >= 1);
-
   const rate = space.hour_price != null ? space.hour_price : space.day_price;
   const rateNum = space.hour_price != null ? Number(space.hour_price) : Number(space.day_price);
   // The amount actually payable (0 when free or covered by the plan's free hours).
@@ -1596,6 +1595,13 @@ function BookingModal({ space, onClose, whishEnabled }) {
   // once we know the member's free-hours balance, so a plan-covered slot is free).
   const canPayWhish = whishEnabled && amountNum > 0 && !memLoading;
   const payMethod = 'whish';
+  // With "pay at center" switched off, a priced booking has to be paid online —
+  // so if Whish can't take it either, there's no way to settle this one and the
+  // backend would reject it. Say so instead of offering a button that fails.
+  const noWayToPay = amountNum > 0 && !payAtCenter && !canPayWhish && !memLoading;
+
+  const canConfirm = !overCap && unitOk && !notEnoughFree && !noWayToPay
+    && (isHourly ? (!!date && !!slot) : dayCount >= 1);
 
   const confirm = async () => {
     if (!canConfirm || busy) return;
@@ -1824,6 +1830,7 @@ function BookingModal({ space, onClose, whishEnabled }) {
                     <span><span style={{ fontWeight: 600, fontSize: 14.5 }}>Pay with Whish</span><br /><span style={{ fontSize: 12.5, color: MS.muted }}>Transfer now & upload your receipt to confirm</span></span>
                   </div>
                 )}
+                {noWayToPay && <p style={{ background: 'rgba(168,90,74,0.12)', color: MS.red, fontSize: 13, fontWeight: 500, padding: '10px 14px', borderRadius: 10, margin: '0 0 14px', lineHeight: 1.4 }}>Online payment is required for this booking, but it isn’t available right now. Please contact the center to book it.</p>}
                 {overCap && <p style={{ background: 'rgba(168,90,74,0.12)', color: MS.red, fontSize: 13, fontWeight: 500, padding: '10px 14px', borderRadius: 10, margin: '0 0 14px', lineHeight: 1.4 }}>Capacity exceeded — max is {cap}.</p>}
                 {err && <p style={{ background: 'rgba(168,90,74,0.12)', color: MS.red, fontSize: 13, fontWeight: 500, padding: '10px 14px', borderRadius: 10, margin: '0 0 14px', lineHeight: 1.4 }}>{err}</p>}
                 <button onClick={confirm} disabled={!canConfirm || busy} style={{ width: '100%', background: (canConfirm && !busy) ? MS.accent : '#ECE8E2', color: (canConfirm && !busy) ? '#fff' : '#A9A39C', border: 'none', fontSize: 16, fontWeight: 600, padding: 15, borderRadius: 9999, cursor: (canConfirm && !busy) ? 'pointer' : 'not-allowed' }}>{busy ? 'Working…' : (canPayWhish && payMethod === 'whish' ? 'Continue to Whish payment' : 'Confirm booking')}</button>
