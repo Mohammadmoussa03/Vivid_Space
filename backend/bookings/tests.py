@@ -2,6 +2,7 @@ from datetime import date, time, timedelta
 
 from django.contrib.auth import get_user_model
 from django.core import mail
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 
@@ -1196,6 +1197,65 @@ class WhishOrderTests(APITestCase):
         self.admin_client.post(f'/api/admin/orders/{order.id}/mark-paid/')
         # The booking under the order is now is_paid — it must not also be summed.
         self.assertEqual(self._revenue(), '$100')
+
+    def _receipt(self, num):
+        """Upload a 1x1 PNG as the transfer receipt."""
+        png = (b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
+               b'\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00'
+               b'\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82')
+        return self.client.post(
+            f'/api/orders/{num}/receipt/',
+            {'file': SimpleUploadedFile('r.png', png, content_type='image/png')},
+            format='multipart')
+
+    def _auto(self, on):
+        s = AdminSettings.load()
+        s.auto_approve = on
+        s.save()
+
+    def test_receipt_confirms_the_booking_without_an_admin_click(self):
+        self._auto(True)
+        num = self.place().data['order_number']
+        order = Order.objects.get(order_number=num)
+        self.assertTrue(order.bookings.get().is_pending)   # held until the receipt
+        mail.outbox = []
+        self.assertEqual(self._receipt(num).status_code, 200)
+        b = order.bookings.get()
+        b.refresh_from_db()
+        self.assertFalse(b.is_pending)                      # no Approve click needed
+        self.assertIn('Your booking is confirmed', mail.outbox[0].body)
+
+    def test_receipt_does_not_mark_the_money_paid(self):
+        """The upload proves a file is an image, not that a transfer happened —
+        an admin still verifies it, and only then does it count as revenue."""
+        self._auto(True)
+        num = self.place().data['order_number']
+        self._receipt(num)
+        order = Order.objects.get(order_number=num)
+        self.assertEqual(order.status, Order.Status.SUBMITTED)   # still awaiting review
+        self.assertFalse(order.bookings.get().is_paid)
+        self.assertEqual(self._revenue(), '$0')
+
+    def test_marking_paid_after_a_receipt_does_not_re_email(self):
+        self._auto(True)
+        num = self.place().data['order_number']
+        self._receipt(num)
+        order = Order.objects.get(order_number=num)
+        mail.outbox = []
+        self.admin_client.post(f'/api/admin/orders/{order.id}/mark-paid/')
+        self.assertEqual(len(mail.outbox), 0)   # already told them it's confirmed
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PAID)
+        self.assertEqual(self._revenue(), '$100')
+
+    def test_receipt_respects_auto_approve_being_off(self):
+        """Off means the admin vets every booking — a receipt can't override that."""
+        self._auto(False)
+        num = self.place().data['order_number']
+        mail.outbox = []
+        self._receipt(num)
+        self.assertTrue(Order.objects.get(order_number=num).bookings.get().is_pending)
+        self.assertEqual(len(mail.outbox), 0)
 
     def test_reject_cancels_bookings_and_frees_slot(self):
         num = self.place().data['order_number']

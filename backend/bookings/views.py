@@ -527,10 +527,15 @@ def confirm_order_paid(order):
     order.paid_at = timezone.now()
     order.save(update_fields=['status', 'paid_at'])
     for b in order.bookings.exclude(status=Booking.Status.CANCELLED):
+        was_pending = b.is_pending
         b.is_pending = False
         b.is_paid = True
         b.save(update_fields=['is_pending', 'is_paid'])
-        _send_booking_confirmation(b)
+        # Only announce a booking that was still held. Once a receipt has already
+        # released and confirmed it, verifying the payment is bookkeeping — the
+        # customer shouldn't get a second "confirmed" email for the same slot.
+        if was_pending:
+            _send_booking_confirmation(b)
 
 
 class OrderDetailView(APIView):
@@ -595,7 +600,34 @@ class OrderReceiptView(APIView):
         order.receipt_url = default_storage.url(path)
         order.status = Order.Status.SUBMITTED
         order.save(update_fields=['receipt_url', 'status'])
+        release_order_hold(order)
         return Response(OrderSerializer(order, context={'request': request}).data)
+
+
+def release_order_hold(order):
+    """Receipt is in — confirm the order's held bookings and tell the customer.
+
+    The slot stops being provisional the moment they've paid and shown it, so the
+    admin doesn't have to click Approve for the customer to hear back. The *money*
+    is a separate question: this deliberately leaves the order SUBMITTED and
+    is_paid False, because the upload only proves the file is an image, not that a
+    transfer happened. An admin still verifies it in Payments → Mark paid, which
+    is also what makes it count toward revenue.
+
+    Skipped when auto-approve is off: the admin has asked to vet every booking,
+    and a receipt doesn't override that.
+    """
+    if not AdminSettings.load().auto_approve:
+        return 0
+    released = 0
+    for b in order.bookings.exclude(status=Booking.Status.CANCELLED):
+        if not b.is_pending:
+            continue
+        b.is_pending = False
+        b.save(update_fields=['is_pending'])
+        _send_booking_confirmation(b)   # reads is_pending — must be set first
+        released += 1
+    return released
 
 
 class OverviewView(APIView):
