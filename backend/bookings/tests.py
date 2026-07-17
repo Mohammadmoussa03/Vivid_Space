@@ -6,8 +6,8 @@ from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 
 from .models import (
-    BlockedSlot, Booking, CustomizationRequest, FAQ, GalleryImage, Membership,
-    MembershipPlan, PackageCategory, PromoCode, Space,
+    AdminSettings, BlockedSlot, Booking, CustomizationRequest, FAQ, GalleryImage,
+    Membership, MembershipPlan, Order, PackageCategory, PromoCode, Space,
 )
 
 User = get_user_model()
@@ -98,12 +98,192 @@ class OverlapTests(BookingTestBase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn('Maintenance', str(resp.data))
 
+    def test_arbitrary_unit_cannot_bypass_capacity(self):
+        # meeting units=2: distinct made-up unit labels must still hit the ceiling.
+        self.assertEqual(self.book(unit='X').status_code, 201)
+        self.assertEqual(self.book(unit='Y').status_code, 201)
+        resp = self.book(unit='Z')  # third distinct unit on a 2-unit space
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('fully booked', str(resp.data))
+
+
+class PastBookingTests(BookingTestBase):
+    def test_past_date_rejected(self):
+        yesterday = (timezone.localdate() - timedelta(days=1)).isoformat()
+        resp = self.book(date=yesterday)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('future', str(resp.data).lower())
+
+    def test_elapsed_slot_today_rejected(self):
+        now = timezone.localtime()
+        if now.hour == 0:
+            self.skipTest('No earlier slot exists at midnight.')
+        resp = self.book(date=timezone.localdate().isoformat(),
+                         start_time=f'{now.hour - 1:02d}:00')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('passed', str(resp.data).lower())
+
+    def test_fullday_today_rejected(self):
+        resp = self.book(date=timezone.localdate().isoformat(), duration='fullday')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('upcoming', str(resp.data).lower())
+
+    def test_fullday_future_allowed(self):
+        resp = self.book(date=self.tomorrow.isoformat(), duration='fullday')
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_hours_past_closing_rejected(self):
+        # Default hours close at 18:00; 15:00 + 6h = 21:00 runs past closing.
+        resp = self.book(start_time='15:00', hours=6)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('closing', str(resp.data).lower())
+
+    def test_hours_ending_exactly_at_closing_allowed(self):
+        resp = self.book(start_time='15:00', hours=3)  # ends 18:00 sharp
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+
+class FulldayUnitTests(BookingTestBase):
+    def test_same_unit_fullday_double_booking_rejected(self):
+        self.assertEqual(
+            self.book(date=self.tomorrow.isoformat(), duration='fullday', unit='Aurora').status_code, 201)
+        resp = self.book(date=self.tomorrow.isoformat(), duration='fullday', unit='Aurora')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('already booked', str(resp.data))
+
+    def test_different_unit_fullday_allowed(self):
+        self.assertEqual(
+            self.book(date=self.tomorrow.isoformat(), duration='fullday', unit='Aurora').status_code, 201)
+        self.assertEqual(
+            self.book(date=self.tomorrow.isoformat(), duration='fullday', unit='Borealis').status_code, 201)
+
+
+class UnitLabelTests(APITestCase):
+    """Every unit of a space must be reachable, and no booking may stay ambiguous
+    once the space has more than one unit."""
+
+    def _space(self, **kw):
+        opts = dict(key='room', name='Room', is_free=False, uses_free_hours=False,
+                    durations=['hourly', 'fullday'], units=1, hour_price=40, day_price=200)
+        opts.update(kw)
+        return Space.objects.create(**opts)
+
+    def test_unnamed_units_get_padded_so_all_are_bookable(self):
+        # 2 rooms but only one named: the second must still be pickable.
+        s = self._space(units=2, unit_names=['1A'])
+        self.assertEqual(s.unit_labels, ['1A', 'Room 2'])
+
+    def test_auto_labels_are_named_after_the_space(self):
+        s = self._space(name='Dedicated Desk', units=3)
+        self.assertEqual(s.unit_labels,
+                         ['Dedicated Desk 1', 'Dedicated Desk 2', 'Dedicated Desk 3'])
+
+    def test_auto_labels_fall_back_when_space_has_no_name(self):
+        self.assertEqual(self._space(name='', units=2).unit_labels, ['Unit 1', 'Unit 2'])
+
+    def test_padding_never_duplicates_an_admin_name(self):
+        # Naming a room literally "Room 2" must not make the auto label collide:
+        # position 2 is taken, so the pad skips ahead rather than repeating it.
+        s = self._space(units=2, unit_names=['Room 2'])
+        self.assertEqual(s.unit_labels, ['Room 2', 'Room 3'])
+        self.assertEqual(len(set(s.unit_labels)), 2)
+
+    def test_labels_capped_at_unit_count(self):
+        s = self._space(units=2, unit_names=['a', 'b', 'c'])
+        self.assertEqual(s.unit_labels, ['a', 'b'])
+
+
+class UnitBackfillTests(APITestCase):
+    """Bookings made while a space had one unit carry unit='' — once the space
+    grows they must be stamped, or they can be double-booked (a named booking on
+    the same physical room is accepted because the blank one names nothing)."""
+
+    def setUp(self):
+        self.space = Space.objects.create(
+            key='meet', name='Meeting Room', is_free=False, uses_free_hours=False,
+            durations=['hourly'], units=1, hour_price=40)
+        self.member = User.objects.create_user(
+            email='m@example.com', password='pw12345678', is_approved=True)
+        self.admin = User.objects.create_user(
+            email='a@example.com', password='pw12345678', is_approved=True,
+            role=User.Role.ADMIN)
+        self.admin_client = APIClient()
+        self.admin_client.force_authenticate(self.admin)
+        self.client.force_authenticate(self.member)
+        self.day = timezone.localdate() + timedelta(days=1)
+
+    def _legacy(self, hour=10):
+        """A booking from when the space had a single unit — no unit recorded."""
+        return Booking.objects.create(
+            user=self.member, space=self.space, date=self.day,
+            duration=Booking.Duration.HOURLY, start_time=time(hour, 0),
+            end_time=time(hour + 1, 0), is_free=False, price=40)
+
+    def test_backfill_stamps_unitless_bookings_when_space_grows(self):
+        b = self._legacy()
+        self.assertEqual(b.unit, '')
+        self.space.units = 2
+        self.space.save()
+        self.assertEqual(self.space.assign_missing_units(), 1)
+        b.refresh_from_db()
+        self.assertEqual(b.unit, 'Meeting Room 1')
+
+    def test_backfill_gives_overlapping_bookings_different_units(self):
+        a, b = self._legacy(), self._legacy()          # same hour, both blank
+        self.space.units = 2
+        self.space.save()
+        self.space.assign_missing_units()
+        a.refresh_from_db(); b.refresh_from_db()
+        self.assertNotEqual(a.unit, b.unit)
+        self.assertEqual({a.unit, b.unit}, {'Meeting Room 1', 'Meeting Room 2'})
+
+    def test_backfill_leaves_non_overlapping_bookings_on_the_same_unit(self):
+        a, b = self._legacy(hour=10), self._legacy(hour=14)   # no clash
+        self.space.units = 2
+        self.space.save()
+        self.space.assign_missing_units()
+        a.refresh_from_db(); b.refresh_from_db()
+        self.assertEqual(a.unit, 'Meeting Room 1')
+        self.assertEqual(b.unit, 'Meeting Room 1')
+
+    def test_admin_raising_units_backfills_automatically(self):
+        """The whole point: after the admin adds a unit, the legacy booking's room
+        is claimed, so booking that same room at that hour is refused."""
+        self._legacy()
+        resp = self.admin_client.patch(
+            f'/api/admin/spaces/{self.space.id}/', {'units': 2}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        clash = self.client.post('/api/bookings/', {
+            'space': 'meet', 'date': self.day.isoformat(), 'duration': 'hourly',
+            'start_time': '10:00', 'hours': 1, 'unit': 'Meeting Room 1'}, format='json')
+        self.assertEqual(clash.status_code, 400, clash.data)
+        self.assertIn('already booked', str(clash.data))
+        # The genuinely free second room is still bookable.
+        ok = self.client.post('/api/bookings/', {
+            'space': 'meet', 'date': self.day.isoformat(), 'duration': 'hourly',
+            'start_time': '10:00', 'hours': 1, 'unit': 'Meeting Room 2'}, format='json')
+        self.assertEqual(ok.status_code, 201, ok.data)
+
 
 class BookingExperienceTests(BookingTestBase):
     def test_attendees_over_capacity_rejected(self):
         resp = self.book(attendees=20)
         self.assertEqual(resp.status_code, 400)
         self.assertIn('holds up to', str(resp.data))
+
+    def test_booking_disabled_space_rejected(self):
+        self.meeting.booking_enabled = False
+        self.meeting.save()
+        resp = self.book()
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('not available', str(resp.data))
+
+    def test_temporarily_unavailable_space_rejected(self):
+        self.meeting.admin_status = Space.AdminStatus.TEMPORARILY_UNAVAILABLE
+        self.meeting.save()
+        resp = self.book()
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('not available', str(resp.data))
 
     def test_booking_emails_client_and_owner(self):
         mail.outbox = []
@@ -264,6 +444,101 @@ class ChangeRequestTests(BookingTestBase):
         resp = self.approve()
         self.assertEqual(resp.status_code, 400)
         self.assertIn('no pending change', str(resp.data).lower())
+
+    # ---- reschedule may also change hours / duration ----
+
+    def test_reschedule_changes_hours_and_resettles_free_hours(self):
+        # Booked 1 free hour in setUp → 1 used, 9 left.
+        self.assertEqual(self.request_change(hours=3).status_code, 200)
+        b = Booking.objects.get(pk=self.booking_id)
+        self.assertEqual(b.requested_hours, 3)
+        self.assertEqual(self.approve().status_code, 200)
+        b.refresh_from_db()
+        self.assertEqual(b.start_time, time(14, 0))
+        self.assertEqual(b.end_time, time(17, 0))          # 3-hour window
+        self.assertEqual(float(b.free_hours_used), 3)
+        self.membership.refresh_from_db()
+        self.assertEqual(float(self.membership.room_hours_used), 3)  # 1 refunded, 3 taken
+
+    def test_reschedule_hourly_to_fullday_refunds_hours(self):
+        self.assertEqual(
+            self.request_change(duration='fullday').status_code, 200)
+        self.assertEqual(self.approve().status_code, 200)
+        b = Booking.objects.get(pk=self.booking_id)
+        self.assertEqual(b.duration, Booking.Duration.FULLDAY)
+        self.assertIsNone(b.start_time)
+        self.assertEqual(float(b.free_hours_used), 0)
+        self.membership.refresh_from_db()
+        self.assertEqual(float(self.membership.room_hours_used), 0)  # hour returned
+
+    def test_reschedule_to_fullday_today_rejected(self):
+        resp = self.request_change(date=timezone.localdate().isoformat(), duration='fullday')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('upcoming', str(resp.data).lower())
+
+    def test_approve_blocked_when_not_enough_free_hours(self):
+        # Drain the balance so the requested longer booking can't be covered.
+        self.membership.room_hours_used = 9   # effective left = 1 (+1 held by booking)
+        self.membership.save()
+        # 09:00 + 5h = 14:00, within closing; the shortfall is the free-hours balance.
+        self.assertEqual(self.request_change(start_time='09:00', hours=5).status_code, 200)
+        resp = self.approve()
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('free meeting-room hours', str(resp.data))
+        b = Booking.objects.get(pk=self.booking_id)
+        self.assertTrue(b.change_requested)       # rolled back, still pending
+        self.assertEqual(b.date, self.tomorrow)
+
+
+class SpacePricingVisibilityTests(APITestCase):
+    """Rates are members-only: hiding them in the UI isn't enough if the public
+    payload still carries the numbers."""
+
+    def setUp(self):
+        self.paid = Space.objects.create(
+            key='office', name='Day Office', durations=['fullday', 'hourly'], units=1,
+            is_free=False, day_price=90, hour_price=18,
+            rates=[{'label': 'Full day', 'price': '90'}],
+        )
+        self.free = Space.objects.create(
+            key='meeting', name='Meeting Room', durations=['hourly'], units=1,
+            is_free=True, uses_free_hours=True,
+        )
+        self.member = User.objects.create_user(
+            email='u@example.com', password='pw12345678', is_approved=True)
+
+    def _get(self, key):
+        return self.client.get(f'/api/spaces/{key}/').data
+
+    def test_anonymous_visitor_gets_no_prices(self):
+        d = self._get('office')
+        self.assertIsNone(d['day_price'])
+        self.assertIsNone(d['hour_price'])
+        self.assertEqual(d['rates'], [])
+
+    def test_anonymous_payload_does_not_contain_the_numbers_anywhere(self):
+        """Guards against a price leaking through some other field."""
+        body = str(self.client.get('/api/spaces/').data)
+        self.assertNotIn('90', body)
+        self.assertNotIn('18', body)
+
+    def test_signed_in_member_sees_prices(self):
+        self.client.force_authenticate(self.member)
+        d = self._get('office')
+        self.assertEqual(float(d['day_price']), 90)
+        self.assertEqual(float(d['hour_price']), 18)
+        self.assertEqual(d['rates'], [{'label': 'Full day', 'price': '90'}])
+
+    def test_free_space_still_advertises_itself_when_logged_out(self):
+        # "Free with plan" is a selling point, not a rate — it must survive.
+        d = self._get('meeting')
+        self.assertTrue(d['free'])
+        self.assertEqual(d['meta'], 'Free with plan')
+
+    def test_non_price_detail_still_public(self):
+        d = self._get('office')
+        self.assertEqual(d['name'], 'Day Office')
+        self.assertEqual(d['durations'], ['fullday', 'hourly'])
 
 
 class SpaceAvailabilityTests(APITestCase):
@@ -594,3 +869,145 @@ class ScheduleChangeTests(APITestCase):
         row = next(u for u in resp.data if u['id'] == self.member.id)
         self.assertTrue(row['schedule_change_requested'])
         self.assertEqual(row['schedule_change_days'], 2)
+
+
+class WhishOrderTests(APITestCase):
+    """Pay-with-Whish checkout: place order → held bookings → verify/reject."""
+
+    def setUp(self):
+        s = AdminSettings.load()
+        s.whish_enabled = True
+        s.whish_number = '+961 70 123 456'
+        s.save()
+        self.space = Space.objects.create(
+            key='paidroom', name='Paid Room', is_free=False, uses_free_hours=False,
+            durations=['hourly', 'fullday'], units=1, hour_price=50, day_price=200,
+        )
+        self.member = User.objects.create_user(
+            email='p@example.com', password='pw12345678', is_approved=True)
+        self.admin = User.objects.create_user(
+            email='adm@example.com', password='pw12345678', is_approved=True,
+            role=User.Role.ADMIN)
+        self.admin_client = APIClient()
+        self.admin_client.force_authenticate(self.admin)
+        self.client.force_authenticate(self.member)
+        self.tomorrow = (timezone.localdate() + timedelta(days=1)).isoformat()
+
+    def place(self, **kw):
+        item = {'space': 'paidroom', 'date': self.tomorrow, 'duration': 'hourly',
+                'start_time': '10:00', 'hours': 2}
+        item.update(kw)
+        return self.client.post('/api/orders/', {'payment_method': 'whish', 'bookings': [item]}, format='json')
+
+    def test_order_creates_pending_booking_with_number(self):
+        resp = self.place()
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertTrue(resp.data['order_number'].startswith('ORD-'))
+        self.assertEqual(resp.data['status'], 'awaiting_payment')
+        self.assertEqual(float(resp.data['amount']), 100.0)      # 50/hr * 2
+        self.assertEqual(resp.data['whish']['number'], '+961 70 123 456')
+        self.assertEqual(resp.data['whish']['message'], resp.data['order_number'])
+        order = Order.objects.get(order_number=resp.data['order_number'])
+        b = order.bookings.get()
+        self.assertTrue(b.is_pending)
+        self.assertFalse(b.is_paid)
+
+    def test_owner_can_fetch_order_but_not_others(self):
+        num = self.place().data['order_number']
+        self.assertEqual(self.client.get(f'/api/orders/{num}/').status_code, 200)
+        other = APIClient()
+        other.force_authenticate(User.objects.create_user(
+            email='x@example.com', password='pw12345678', is_approved=True))
+        self.assertEqual(other.get(f'/api/orders/{num}/').status_code, 404)
+
+    def test_mark_paid_confirms_bookings(self):
+        num = self.place().data['order_number']
+        order = Order.objects.get(order_number=num)
+        resp = self.admin_client.post(f'/api/admin/orders/{order.id}/mark-paid/')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['status'], 'paid')
+        b = order.bookings.get()
+        b.refresh_from_db()
+        self.assertTrue(b.is_paid)
+        self.assertFalse(b.is_pending)
+
+    def _revenue(self):
+        kpis = self.admin_client.get('/api/admin/dashboard/').data['kpis']
+        return next(k['value'] for k in kpis if k['label'] == 'Revenue this month')
+
+    def test_revenue_counts_paid_orders_not_unpaid_ones(self):
+        """Revenue comes from Payments: an order only counts once it's marked paid."""
+        self.assertEqual(self._revenue(), '$0')
+        order = Order.objects.get(order_number=self.place().data['order_number'])
+        self.assertEqual(self._revenue(), '$0')          # awaiting payment — not revenue yet
+        self.admin_client.post(f'/api/admin/orders/{order.id}/mark-paid/')
+        self.assertEqual(self._revenue(), '$100')        # 50/hr * 2
+
+    def test_revenue_includes_center_paid_booking_with_no_order(self):
+        """Pay-at-center bookings never get an Order, so they're counted via the
+        order-less leg — otherwise that income would vanish from the KPI."""
+        b = Booking.objects.create(
+            user=self.member, space=self.space, date=timezone.localdate(),
+            duration=Booking.Duration.FULLDAY, is_free=False, price=200, is_paid=True)
+        self.assertIsNone(b.order)
+        self.assertEqual(self._revenue(), '$200')
+
+    def test_revenue_is_cash_basis_not_booking_date(self):
+        """Money counts toward the month it was collected, even when the booking
+        it paid for falls in a later month."""
+        next_month = (timezone.localdate().replace(day=1) + timedelta(days=32)).replace(day=1)
+        order = Order.objects.get(
+            order_number=self.place(date=next_month.isoformat()).data['order_number'])
+        self.admin_client.post(f'/api/admin/orders/{order.id}/mark-paid/')
+        # Booking is next month; the payment landed today — so it's this month's revenue.
+        self.assertEqual(order.bookings.get().date.month, next_month.month)
+        self.assertEqual(self._revenue(), '$100')
+
+    def test_revenue_does_not_double_count_an_orders_bookings(self):
+        """The order leg and the order-less leg must stay disjoint."""
+        order = Order.objects.get(order_number=self.place().data['order_number'])
+        self.admin_client.post(f'/api/admin/orders/{order.id}/mark-paid/')
+        # The booking under the order is now is_paid — it must not also be summed.
+        self.assertEqual(self._revenue(), '$100')
+
+    def test_reject_cancels_bookings_and_frees_slot(self):
+        num = self.place().data['order_number']
+        order = Order.objects.get(order_number=num)
+        resp = self.admin_client.post(f'/api/admin/orders/{order.id}/reject/', {'reason': 'No transfer found'})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['status'], 'rejected')
+        self.assertTrue(order.bookings.get().status == Booking.Status.CANCELLED)
+        # Slot is free again — a fresh hourly booking at the same time succeeds.
+        again = self.place()
+        self.assertEqual(again.status_code, 201, again.data)
+
+    def test_mark_paid_on_rejected_order_blocked(self):
+        num = self.place().data['order_number']
+        order = Order.objects.get(order_number=num)
+        self.admin_client.post(f'/api/admin/orders/{order.id}/reject/', {'reason': 'x'})
+        resp = self.admin_client.post(f'/api/admin/orders/{order.id}/mark-paid/')
+        self.assertEqual(resp.status_code, 400)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.REJECTED)  # not flipped to paid
+
+    def test_duplicate_lines_in_one_order_rejected(self):
+        item = {'space': 'paidroom', 'date': self.tomorrow, 'duration': 'hourly',
+                'start_time': '10:00', 'hours': 2}
+        resp = self.client.post('/api/orders/',
+                                {'payment_method': 'whish', 'bookings': [item, dict(item)]},
+                                format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(Order.objects.count(), 0)  # rolled back
+
+    def test_admin_export_orders_xlsx(self):
+        self.place()
+        resp = self.admin_client.get('/api/admin/orders/export/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('spreadsheet', resp['Content-Type'])
+        self.assertIn('attachment', resp['Content-Disposition'])
+
+    def test_admin_export_reservations_xlsx(self):
+        self.place()
+        resp = self.admin_client.get('/api/admin/reservations/export/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('spreadsheet', resp['Content-Type'])

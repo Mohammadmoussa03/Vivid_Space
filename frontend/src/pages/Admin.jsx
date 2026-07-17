@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import logoColor from '../assets/vividspace-logo.png';
 import { useAuth } from '../context/AuthContext';
@@ -18,12 +18,15 @@ import {
   adminCustomizations, adminUpdateCustomization, adminDeleteCustomization,
   adminBlockedSlots, adminCreateBlockedSlot, adminDeleteBlockedSlot,
   adminContent, adminSaveContent, adminSettings, adminSaveSettings,
+  adminOrders, adminMarkOrderPaid, adminRejectOrder,
+  adminExportReservations, adminExportOrders,
 } from '../lib/services';
 
 const NAV = [
   { key: 'overview', label: 'Overview', icon: '◧' },
   { key: 'users', label: 'Users', icon: '◔' },
-  { key: 'reservations', label: 'Reservations', icon: '▤' },
+  { key: 'reservations', label: 'Daily Bookings', icon: '▤' },
+  { key: 'payments', label: 'Payments', icon: '$' },
   { key: 'spaces', label: 'Spaces', icon: '◈' },
   { key: 'packages', label: 'Packages', icon: '❏' },
   { key: 'faq', label: 'FAQ', icon: '?' },
@@ -34,8 +37,8 @@ const NAV = [
   { key: 'content', label: 'Website content', icon: '✎' },
 ];
 const TITLES = {
-  overview: 'Dashboard overview', users: 'User management', reservations: 'Reservation management',
-  spaces: 'Space management', packages: 'Package management',
+  overview: 'Dashboard overview', users: 'User management', reservations: 'Daily Bookings management',
+  payments: 'Whish payments', spaces: 'Space management', packages: 'Package management',
   faq: 'FAQ management', promos: 'Promo code management', tours: 'Tour requests',
   customizations: 'Custom package requests',
   calendar: 'Calendar blocking', content: 'Website content',
@@ -54,6 +57,18 @@ const smallBtn = (variant = 'ghost') => {
 const th = { fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: MS.faint, fontWeight: 600 };
 
 const matches = (row, q) => !q || JSON.stringify(row).toLowerCase().includes(q.toLowerCase());
+
+// Fetch an .xlsx Blob and trigger a browser download.
+async function exportXlsx(fetcher, name) {
+  try {
+    const blob = await fetcher();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${name}.xlsx`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) { window.alert(apiError(e, 'Export failed.')); }
+}
 
 export default function Admin() {
   const nav = useNavigate();
@@ -139,6 +154,7 @@ export default function Admin() {
           {view === 'overview' && <Overview />}
           {view === 'users' && <Users query={query} />}
           {view === 'reservations' && <Reservations query={query} />}
+          {view === 'payments' && <Payments query={query} />}
           {view === 'spaces' && <Spaces query={query} onEdit={(s) => setModal({ type: 'space', initial: s })} modalClosed={modal} />}
           {view === 'packages' && <Packages query={query} onEdit={(p) => setModal({ type: 'package', initial: p })} modalClosed={modal} />}
           {view === 'faq' && <Faqs query={query} onEdit={(f) => setModal({ type: 'faq', initial: f })} modalClosed={modal} />}
@@ -704,27 +720,29 @@ function CustomizeModal({ user, onClose }) {
 /* ---------------- Reservations ---------------- */
 function Reservations({ query }) {
   const [filter, setFilter] = useState('all');
+  const [detail, setDetail] = useState(null);
   const [rows, reload] = useData(() => adminReservations(filter === 'all' ? '' : filter), [filter]);
   const act = (fn) => (id) => fn(id).then(reload).catch((e) => window.alert(apiError(e) || 'Action failed.'));
   const approve = act(adminApproveReservation), cancel = act(adminCancelReservation), pay = act(adminTogglePaid);
   const approveChange = act(adminApproveChange), rejectChange = act(adminRejectChange);
   const FILTERS = [['all', 'All'], ['pending', 'Pending'], ['change', 'Change requests'], ['confirmed', 'Confirmed'], ['cancelled', 'Cancelled'], ['past', 'Past']];
   // Shared fixed template — identical for header + every row. The Actions column
-  // is a fixed width (fits Approve + Mark paid + Cancel) so button count never
-  // shifts the other columns.
-  const cols = '90px minmax(160px,1.4fr) minmax(140px,1.2fr) 110px 100px 110px 240px';
+  // is a fixed width (fits Approve + Mark paid + Cancel + View more) so button
+  // count never shifts the other columns.
+  const cols = '90px minmax(160px,1.4fr) minmax(140px,1.2fr) 110px 100px 110px 330px';
   return (
     <>
-      <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap', marginBottom: 20 }}>
+      <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap', alignItems: 'center', marginBottom: 20 }}>
         {FILTERS.map(([k, l]) => <FilterPill key={k} label={l} active={filter === k} onClick={() => setFilter(k)} />)}
+        <button onClick={() => exportXlsx(() => adminExportReservations(filter), 'reservations')} style={{ ...smallBtn('green'), marginLeft: 'auto' }}>⭳ Export Excel</button>
       </div>
       <div style={{ ...card, overflowX: 'auto' }}>
-        <div style={{ minWidth: 950 }}>
+        <div style={{ minWidth: 1040 }}>
           <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 14, padding: '14px 22px', borderBottom: `1px solid ${MS.line}`, ...th }}>
             <span>Ref</span><span>Member</span><span>Space</span><span>Date</span><span>Payment</span><span>Status</span><span style={{ textAlign: 'right' }}>Actions</span>
           </div>
           {!rows && <div style={{ padding: 30, textAlign: 'center', color: MS.faint }}>Loading…</div>}
-          {rows && rows.filter((r) => matches(r, query)).length === 0 && <div style={{ padding: 30, textAlign: 'center', color: MS.faint }}>No reservations.</div>}
+          {rows && rows.filter((r) => matches(r, query)).length === 0 && <div style={{ padding: 30, textAlign: 'center', color: MS.faint }}>No daily bookings.</div>}
           {(rows || []).filter((r) => matches(r, query)).map((r) => {
             const payText = r.is_paid ? 'Paid' : (r.is_free ? 'Free' : 'Pending');
             const payTone = r.is_paid ? TONES.green : (r.is_free ? TONES.lilac : TONES.amber);
@@ -752,13 +770,218 @@ function Reservations({ query }) {
                       {r.cancellable && <button onClick={() => cancel(r.id)} style={smallBtn('danger')}>Cancel</button>}
                     </>
                   )}
+                  <button onClick={() => setDetail(r)} style={smallBtn()}>View more</button>
                 </div>
               </div>
             );
           })}
         </div>
       </div>
+      {detail && <BookingDetailModal r={detail} onClose={() => setDetail(null)} />}
     </>
+  );
+}
+
+/* ---------------- Payments (Whish orders) ---------------- */
+function Payments({ query }) {
+  const [filter, setFilter] = useState('all');
+  const [detail, setDetail] = useState(null);
+  const [rows, reload] = useData(() => adminOrders(filter === 'all' ? '' : filter), [filter]);
+  const markPaid = (id) => {
+    if (!window.confirm('Confirm the Whish transfer was received? This confirms the booking(s) and emails the customer.')) return;
+    adminMarkOrderPaid(id).then(reload).catch((e) => window.alert(apiError(e) || 'Could not mark paid.'));
+  };
+  const reject = (id) => {
+    const reason = window.prompt('Reason for rejecting (optional — shown to the customer):');
+    if (reason === null) return; // cancelled the prompt
+    adminRejectOrder(id, reason).then(reload).catch((e) => window.alert(apiError(e) || 'Could not reject.'));
+  };
+  const FILTERS = [['all', 'All'], ['awaiting_payment', 'Awaiting'], ['submitted', 'Receipt in'], ['paid', 'Paid'], ['rejected', 'Rejected']];
+  const TONE = {
+    awaiting_payment: ['rgba(240,130,46,.16)', '#B7701F'],
+    submitted: ['rgba(46,115,224,.16)', '#2E73E0'],
+    paid: ['rgba(63,122,90,.16)', '#3F7A5A'],
+    rejected: ['rgba(168,90,74,.16)', '#A85A4A'],
+  };
+  // Actions is fixed-width (Mark paid + Reject + View more) so the button count
+  // never reflows the other columns.
+  const cols = '120px minmax(150px,1.3fr) 100px minmax(180px,1.5fr) 90px 130px 280px';
+  return (
+    <>
+      <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap', alignItems: 'center', marginBottom: 20 }}>
+        {FILTERS.map(([k, l]) => <FilterPill key={k} label={l} active={filter === k} onClick={() => setFilter(k)} />)}
+        <button onClick={() => exportXlsx(() => adminExportOrders(filter), 'whish_orders')} style={{ ...smallBtn('green'), marginLeft: 'auto' }}>⭳ Export Excel</button>
+      </div>
+      <div style={{ ...card, overflowX: 'auto' }}>
+        <div style={{ minWidth: 1090 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 14, padding: '14px 22px', borderBottom: `1px solid ${MS.line}`, ...th }}>
+            <span>Order</span><span>Customer</span><span>Amount</span><span>Bookings</span><span>Receipt</span><span>Status</span><span style={{ textAlign: 'right' }}>Actions</span>
+          </div>
+          {!rows && <div style={{ padding: 30, textAlign: 'center', color: MS.faint }}>Loading…</div>}
+          {rows && rows.filter((r) => matches(r, query)).length === 0 && <div style={{ padding: 30, textAlign: 'center', color: MS.faint }}>No payment orders.</div>}
+          {(rows || []).filter((r) => matches(r, query)).map((o) => {
+            const [bg, color] = TONE[o.status] || TONE.awaiting_payment;
+            return (
+              <div key={o.id} style={{ display: 'grid', gridTemplateColumns: cols, gap: 14, alignItems: 'center', padding: '15px 22px', borderTop: `1px solid ${MS.line2}` }}>
+                <span style={{ fontSize: 13, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{o.order_number}</span>
+                <span style={{ minWidth: 0 }}>
+                  <span style={{ display: 'block', fontSize: 14, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{o.customer}</span>
+                  <span style={{ fontSize: 12, color: MS.faint }}>{o.email}</span>
+                </span>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>{o.amount_display}</span>
+                <span style={{ fontSize: 12.5, color: MS.muted }}>
+                  {(o.bookings || []).map((b, i) => <span key={i} style={{ display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{b.label} · {fmtDate(b.date)} · {b.time}</span>)}
+                </span>
+                <span>{o.receipt_url ? <a href={o.receipt_url} target="_blank" rel="noreferrer" style={{ color: MS.accent, fontWeight: 600, fontSize: 13 }}>View</a> : <span style={{ color: MS.faint }}>—</span>}</span>
+                <span>{pill(bg, color, o.status_label)}</span>
+                <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                  {o.status !== 'paid' && <button onClick={() => markPaid(o.id)} style={smallBtn('green')}>Mark paid</button>}
+                  {o.status !== 'paid' && o.status !== 'rejected' && <button onClick={() => reject(o.id)} style={smallBtn('danger')}>Reject</button>}
+                  <button onClick={() => setDetail(o)} style={smallBtn()}>View more</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      {detail && <OrderDetailModal o={detail} tone={TONE[detail.status] || TONE.awaiting_payment} onClose={() => setDetail(null)} />}
+    </>
+  );
+}
+
+/* ---------------- Detail modals (“View more”) ---------------- */
+// Read-only sheet shared by the Daily Bookings and Payments tables.
+function DetailModal({ title, subtitle, badge, onClose, children }) {
+  useEffect(() => {
+    const onKey = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(20,18,16,0.62)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 'clamp(14px,4vw,40px)', animation: 'ms-fade 200ms ease-out both' }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: MS.panel, width: 'min(620px, 100%)', maxHeight: '90vh', overflowY: 'auto', borderRadius: 20, padding: 'clamp(24px,4vw,32px)', boxShadow: '0 30px 80px rgba(20,18,16,0.32)' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 4 }}>
+          <div style={{ minWidth: 0 }}>
+            <h3 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 22, margin: 0 }}>{title}</h3>
+            {subtitle && <p style={{ fontSize: 13, color: MS.faint, margin: '3px 0 0' }}>{subtitle}</p>}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '0 0 auto' }}>
+            {badge}
+            <button onClick={onClose} aria-label="Close" style={{ width: 36, height: 36, borderRadius: 9999, border: `1px solid ${MS.line}`, background: '#fff', color: MS.ink, fontSize: 16, cursor: 'pointer' }}>✕</button>
+          </div>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// One label/value line; renders nothing when the value is empty so blank
+// optional fields (unit, company, attendees…) don't leave dangling labels.
+const fact = (k, v) => (v === null || v === undefined || v === '') ? null : (
+  <div style={{ display: 'flex', gap: 10, fontSize: 14 }}>
+    <span style={{ flex: '0 0 120px', color: MS.faint }}>{k}</span>
+    <span style={{ color: MS.ink, wordBreak: 'break-word' }}>{v}</span>
+  </div>
+);
+const factGroup = (label) => <p style={{ fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', color: MS.faint, fontWeight: 600, margin: '22px 0 12px' }}>{label}</p>;
+const factList = (children) => <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{children}</div>;
+const fmtStamp = (iso) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
+
+function BookingDetailModal({ r, onClose }) {
+  const payTone = r.is_paid ? TONES.green : (r.is_free ? TONES.lilac : TONES.amber);
+  const payText = r.is_paid ? 'Paid' : (r.is_free ? 'Free with plan' : 'Payment pending');
+  return (
+    <DetailModal title={r.client} subtitle={`MS-${r.id} · ${r.space_label}`}
+      badge={pill(r.status_bg, r.status_color, r.status_label)} onClose={onClose}>
+      {factGroup('Member')}
+      {factList(<>
+        {fact('Name', r.client)}
+        {fact('Email', r.email)}
+        {fact('Company', r.company)}
+      </>)}
+
+      {factGroup('Booking')}
+      {factList(<>
+        {fact('Reference', `MS-${r.id}`)}
+        {fact('Space', r.space_name)}
+        {fact('Unit', r.unit)}
+        {fact('Date', fmtDate(r.date))}
+        {fact('Time', r.time_label)}
+        {fact('Duration', r.duration_label)}
+        {fact('Attendees', r.attendees)}
+        {fact('Booked on', fmtStamp(r.created_at))}
+      </>)}
+
+      {factGroup('Payment')}
+      {factList(<>
+        {fact('Status', pill(payTone.bg, payTone.color, payText))}
+        {fact('Price', r.price_display)}
+        {Number(r.free_hours_used) > 0 && fact('Free hours used', `${r.free_hours_used} hr`)}
+        {fact('Order', r.order_number)}
+      </>)}
+
+      {r.change_requested && r.requested_label && (<>
+        {factGroup('Change requested')}
+        {factList(<>
+          {fact('Current', `${r.date_label} · ${r.time_label}`)}
+          {fact('Requested', <span style={{ color: MS.accent, fontWeight: 600 }}>{r.requested_label}</span>)}
+        </>)}
+      </>)}
+    </DetailModal>
+  );
+}
+
+function OrderDetailModal({ o, tone, onClose }) {
+  const [bg, color] = tone;
+  const rows = o.bookings || [];
+  return (
+    <DetailModal title={o.order_number} subtitle={`${o.customer} · ${o.amount_display}`}
+      badge={pill(bg, color, o.status_label)} onClose={onClose}>
+      {factGroup('Customer')}
+      {factList(<>
+        {fact('Name', o.customer)}
+        {fact('Email', o.email)}
+        {fact('Company', o.company)}
+      </>)}
+
+      {factGroup('Payment')}
+      {factList(<>
+        {fact('Order number', o.order_number)}
+        {fact('Amount', <strong>{o.amount_display}</strong>)}
+        {fact('Method', o.method_label)}
+        {fact('Placed on', fmtStamp(o.created_at))}
+        {fact('Paid on', fmtStamp(o.paid_at))}
+        {fact('Receipt', o.receipt_url
+          ? <a href={o.receipt_url} target="_blank" rel="noreferrer" style={{ color: MS.accent, fontWeight: 600 }}>Open receipt image ↗</a>
+          : 'Not uploaded yet')}
+        {fact('Note', o.note)}
+      </>)}
+
+      {factGroup(`Bookings in this order (${rows.length})`)}
+      {rows.length === 0 && <p style={{ color: MS.faint, fontSize: 14 }}>No bookings attached.</p>}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {rows.map((b, i) => (
+          <div key={b.id ?? i} style={{ ...card, padding: '13px 16px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 6 }}>
+              <span style={{ fontSize: 15, fontWeight: 600 }}>{b.space || b.label}</span>
+              {b.unit && <span style={{ fontSize: 12.5, color: MS.muted, background: MS.line2, padding: '3px 10px', borderRadius: 9999 }}>{b.unit}</span>}
+              {b.status_label && <span style={{ fontSize: 12.5, color: MS.faint, marginLeft: 'auto' }}>{b.status_label}</span>}
+            </div>
+            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 13, color: MS.muted }}>
+              <span>{fmtDate(b.date)}</span>
+              <span>{b.time}</span>
+              {b.attendees ? <span>{b.attendees} attendee{b.attendees === 1 ? '' : 's'}</span> : null}
+              {b.price && <span style={{ fontWeight: 600, color: MS.ink }}>{b.price}</span>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </DetailModal>
   );
 }
 
@@ -1083,10 +1306,12 @@ function Content() {
   const SECTIONS = [
     { title: 'Hero', desc: 'Headline, subtext and background image/video', edit: () => setModal('hero') },
     { title: 'Intro statement', desc: 'The large statement under the hero', edit: () => setModal('intro') },
+    { title: 'About us', desc: 'The About us section — heading, story and highlights', edit: () => setModal('about') },
     { title: 'Members', desc: 'Testimonials — quotes, names and photos', edit: () => setModal('testimonials') },
     { title: 'Contact information', desc: 'Email, phone, address and map', edit: () => setModal('contact') },
     { title: 'Business hours', desc: 'Opening times and tour notifications', edit: () => setModal('hours') },
     { title: 'Booking rules', desc: 'Same-day, auto-approve, pay-at-center', edit: () => setModal('rules') },
+    { title: 'Whish payment', desc: 'Enable Pay-with-Whish, receiving number and QR', edit: () => setModal('whish') },
   ];
 
   const saveContent = (payload) => adminSaveContent(payload).then((d) => { setContent(d); });
@@ -1101,6 +1326,12 @@ function Content() {
     ] },
     intro: { title: 'Intro statement', save: saveContent, initial: content, fields: [
       { name: 'intro_text', label: 'Statement text', type: 'textarea' },
+    ] },
+    about: { title: 'About us', save: saveContent, initial: content, fields: [
+      { name: 'about_eyebrow', label: 'Eyebrow (small label above the heading)', type: 'text' },
+      { name: 'about_title', label: 'Heading', type: 'text' },
+      { name: 'about_body', label: 'Story (blank line between paragraphs)', type: 'textarea' },
+      { name: 'about_points', label: 'Highlights (one per line, optional — e.g. Founded 2021)', type: 'list' },
     ] },
     contact: { title: 'Contact information', save: saveSettings, initial: settings, fields: [
       { name: 'contact_email', label: 'Email', type: 'text' },
@@ -1118,8 +1349,13 @@ function Content() {
     rules: { title: 'Booking rules', save: saveSettings, initial: settings, fields: [
       { name: 'allow_sameday', label: 'Allow same-day bookings', type: 'checkbox' },
       { name: 'auto_approve', label: 'Auto-approve bookings', type: 'checkbox' },
-      { name: 'pay_at_center', label: 'Pay at center', type: 'checkbox' },
       { name: 'sameday_cutoff', label: 'Same-day cutoff (HH:MM)', type: 'text' },
+    ] },
+    whish: { title: 'Whish payment', save: saveSettings, initial: settings, fields: [
+      { name: 'whish_enabled', label: 'Offer “Pay with Whish” at checkout', type: 'checkbox' },
+      { name: 'whish_number', label: 'Whish receiving number (e.g. +961 XX XXX XXX)', type: 'text' },
+      { name: 'whish_account_name', label: 'Account name (optional)', type: 'text' },
+      { name: 'whish_qr_url', label: 'Whish QR code (upload an image or paste a URL)', type: 'media' },
     ] },
   };
   const active = modal && FORMS[modal];
@@ -1223,6 +1459,10 @@ const RECORD_FORMS = {
       { name: 'day_price', label: 'Price per day', type: 'number' },
       { name: 'hour_price', label: 'Price per hour', type: 'number' },
       { name: 'units', label: 'Units (identical rooms)', type: 'number' },
+      // One line per unit, auto-filled from the space name + count so the admin
+      // edits real names instead of a positional list they have to keep in their head.
+      { name: 'unit_names', label: 'Unit names (one line per unit — rename any line, e.g. 9A)', type: 'list',
+        autoLines: { countField: 'units', baseField: 'name' } },
       { name: 'amenities', label: 'Amenities (one per line)', type: 'list' },
       { name: 'equipment', label: 'Equipment (one per line)', type: 'list' },
       { name: 'durations', label: 'Durations (hourly / fullday, one per line)', type: 'list' },
@@ -1354,6 +1594,37 @@ function FormModal({ title, fields, initial, categories = [], spaces = [], showU
   const [err, setErr] = useState('');
   const [uploading, setUploading] = useState(false);
   const set = (name, val) => setForm((s) => ({ ...s, [name]: val }));
+
+  // A `list` field holding one row per unit (Space → unit names) stays in step
+  // with the count, pre-filled from the space name. Rows the admin has renamed
+  // are kept; rows still carrying a generated name follow a space rename. This
+  // mirrors Space.unit_labels on the backend — the admin sees the same names the
+  // member will, instead of a positional list they have to keep in their head.
+  const autoField = fields.find((f) => f.autoLines);
+  const autoCount = autoField ? form[autoField.autoLines.countField] : null;
+  const autoBase = autoField ? form[autoField.autoLines.baseField] : null;
+  const prevBase = useRef(autoBase);
+  useEffect(() => {
+    if (!autoField) return;
+    const base = String(autoBase || '').trim();
+    const before = String(prevBase.current || '').trim();
+    prevBase.current = base;
+    // Blank/0 count: leave the rows alone rather than wiping the admin's names
+    // while they're mid-edit. The cap keeps a fat-fingered count from hanging the form.
+    const n = Math.min(Number(autoCount) || 0, 200);
+    if (n < 1) return;
+    const nameOf = (b, i) => (b ? `${b} ${i + 1}` : `Unit ${i + 1}`);
+    setForm((s) => {
+      const rows = String(s[autoField.name] || '').split('\n').map((x) => x.trim());
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const generated = rows[i] === nameOf(before, i) || rows[i] === nameOf('', i);
+        out.push(rows[i] && !generated ? rows[i] : nameOf(base, i));
+      }
+      const next = out.join('\n');
+      return next === s[autoField.name] ? s : { ...s, [autoField.name]: next };
+    });
+  }, [autoField, autoCount, autoBase]);
   const isVid = (u) => /\.(mp4|webm|ogg|mov)(\?|$)/i.test(u || '');
   const onMedia = async (f, file) => {
     if (!file) return;

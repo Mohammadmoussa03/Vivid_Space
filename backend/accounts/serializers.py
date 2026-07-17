@@ -42,10 +42,10 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         password = validated_data.pop('password')
-        # New accounts start unapproved and pending admin review.
+        # New accounts are auto-approved and can log in immediately (no admin gate).
         user = User.objects.create_user(
             password=password,
-            is_approved=False,
+            is_approved=True,
             role=User.Role.MEMBER,
             **validated_data,
         )
@@ -79,7 +79,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         value = value.strip().lower()
         qs = User.objects.filter(email=value).exclude(pk=self.instance.pk)
         if qs.exists():
-            raise serializers.ValidationError('That email is already in use.')
+            # Neutral wording so this isn't a clean account-enumeration oracle.
+            raise serializers.ValidationError("This email can't be used. Try another.")
         return value
 
 

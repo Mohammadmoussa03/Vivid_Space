@@ -18,18 +18,20 @@ from accounts.emails import send_account_approved, send_password_reset
 from accounts.permissions import IsAdminRole
 from bookings.models import (
     AdminSettings, BlockedSlot, Booking, CustomizationRequest, FAQ, GalleryImage,
-    Membership, MembershipPlan, PackageCategory, PromoCode, SiteContent, Space,
+    Membership, MembershipPlan, Order, PackageCategory, PromoCode, SiteContent, Space,
     TourRequest,
 )
 from bookings.serializers import (
     BookingCreateSerializer, FAQSerializer, GalleryImageSerializer, MONTHS,
 )
 from bookings.views import (
-    _booking_length_hours, _send_change_result, _send_schedule_change_result,
-    _slot_end_time,
+    NotEnoughHoursError, apply_booking_change, confirm_order_paid,
+    _booking_length_hours, _refund_free_hours, _send_change_result,
+    _send_schedule_change_result, _slot_end_time,
 )
 
 from .serializers import (
+    AdminOrderSerializer,
     AdminPackageCategorySerializer,
     AdminSettingsSerializer,
     AdminSpaceSerializer,
@@ -53,6 +55,33 @@ def _money(amount):
     if amount >= 1000:
         return f'${amount / 1000:.1f}k'
     return f'${amount:.0f}'
+
+
+def _xlsx_response(filename, headers, rows):
+    """Build a formatted .xlsx download (bold frozen header, autosized columns)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+    from django.http import HttpResponse
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Export'
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for row in rows:
+        ws.append(row)
+    for i, header in enumerate(headers, 1):
+        longest = max([len(str(header))]
+                      + [len(str(r[i - 1])) for r in rows if i - 1 < len(r) and r[i - 1] is not None] or [0])
+        ws.column_dimensions[get_column_letter(i)].width = min(max(longest + 2, 10), 55)
+    ws.freeze_panes = 'A2'
+    resp = HttpResponse(
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    resp['Content-Disposition'] = f'attachment; filename="{filename}.xlsx"'
+    wb.save(resp)
+    return resp
 
 
 def _ago(dt):
@@ -319,9 +348,9 @@ class AdminReservationViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
     def get_queryset(self):
-        qs = Booking.objects.all().select_related('space', 'user')
+        qs = Booking.objects.all().select_related('space', 'user', 'order')
         f = self.request.query_params.get('filter')
-        today = date.today()
+        today = timezone.localdate()
         if f == 'pending':
             qs = qs.filter(is_pending=True, status=Booking.Status.CONFIRMED)
         elif f == 'change':
@@ -343,6 +372,36 @@ class AdminReservationViewSet(viewsets.ModelViewSet):
         super().update(request, *args, **kwargs)
         booking = self.get_object()
         return Response(ReservationSerializer(booking).data)
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        """GET /api/admin/reservations/export/ — detailed .xlsx of reservations,
+        honouring the same ?filter as the list."""
+        headers = ['Ref', 'Member', 'Email', 'Space', 'Unit', 'Date', 'Duration',
+                   'Start', 'End', 'Attendees', 'Status', 'Payment', 'Price ($)',
+                   'Free hours', 'Order #', 'Booked on']
+        rows = []
+        for b in self.get_queryset().order_by('-date', '-start_time'):
+            payment = 'Paid' if b.is_paid else ('Free' if b.is_free else 'Unpaid')
+            rows.append([
+                f'MS-{b.id}',
+                b.user.full_name or b.user.email,
+                b.user.email,
+                b.space.name,
+                b.unit or '',
+                b.date.isoformat(),
+                b.get_duration_display(),
+                b.start_time.strftime('%H:%M') if b.start_time else '',
+                b.end_time.strftime('%H:%M') if b.end_time else '',
+                b.attendees or '',
+                b.reservation_status.capitalize(),
+                payment,
+                float(b.price) if b.price is not None else '',
+                float(b.free_hours_used) if b.free_hours_used else '',
+                b.order.order_number if b.order else '',
+                timezone.localtime(b.created_at).strftime('%Y-%m-%d %H:%M'),
+            ])
+        return _xlsx_response('reservations', headers, rows)
 
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
@@ -376,10 +435,14 @@ class AdminReservationViewSet(viewsets.ModelViewSet):
                             status=status.HTTP_400_BAD_REQUEST)
 
         new_date = booking.requested_date
+        # The member may have changed the shape too (hourly ↔ full day, hours).
+        duration = booking.requested_duration or booking.duration
         start = end = None
-        if booking.duration == Booking.Duration.HOURLY:
+        hours = None
+        if duration == Booking.Duration.HOURLY:
             start = booking.requested_start_time
-            end = _slot_end_time(new_date, start, _booking_length_hours(booking))
+            hours = booking.requested_hours or _booking_length_hours(booking)
+            end = _slot_end_time(new_date, start, hours)
 
         conflict = BookingCreateSerializer._overlap_conflict(
             booking.space, new_date, booking.unit, start, end, exclude_pk=booking.pk,
@@ -392,16 +455,11 @@ class AdminReservationViewSet(viewsets.ModelViewSet):
             return Response({'detail': f'Can\'t approve — {blocked}'},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        booking.date = new_date
-        booking.start_time = start
-        booking.end_time = end
-        booking.change_requested = False
-        booking.requested_date = None
-        booking.requested_start_time = None
-        booking.save(update_fields=[
-            'date', 'start_time', 'end_time',
-            'change_requested', 'requested_date', 'requested_start_time',
-        ])
+        try:
+            apply_booking_change(booking, new_date, duration, start, end, hours)
+        except NotEnoughHoursError as exc:
+            return Response({'detail': f'Can\'t approve — {exc}'},
+                            status=status.HTTP_400_BAD_REQUEST)
         _send_change_result(booking, approved=True)
         return Response(ReservationSerializer(booking).data)
 
@@ -415,8 +473,11 @@ class AdminReservationViewSet(viewsets.ModelViewSet):
         booking.change_requested = False
         booking.requested_date = None
         booking.requested_start_time = None
+        booking.requested_duration = None
+        booking.requested_hours = None
         booking.save(update_fields=[
             'change_requested', 'requested_date', 'requested_start_time',
+            'requested_duration', 'requested_hours',
         ])
         _send_change_result(booking, approved=False)
         return Response(ReservationSerializer(booking).data)
@@ -619,6 +680,81 @@ class GalleryUploadView(APIView):
                         status=status.HTTP_201_CREATED)
 
 
+class AdminOrderViewSet(viewsets.ReadOnlyModelViewSet):
+    """GET /api/admin/orders/ — Whish payment orders, newest first, with
+    verify (mark-paid) and reject actions."""
+
+    permission_classes = [IsAdminRole]
+    serializer_class = AdminOrderSerializer
+    queryset = Order.objects.select_related('user').prefetch_related('bookings__space')
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        st = self.request.query_params.get('status')
+        if st:
+            qs = qs.filter(status=st)
+        return qs
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        """GET /api/admin/orders/export/ — detailed .xlsx of Whish payment orders,
+        honouring the same ?status filter."""
+        headers = ['Order #', 'Customer', 'Email', 'Amount ($)', 'Method', 'Status',
+                   'Bookings', 'Receipt', 'Placed on', 'Paid on']
+        rows = []
+        for o in self.get_queryset():
+            lines = []
+            for b in o.bookings.all():
+                when = b.start_time.strftime('%H:%M') if b.start_time else 'Full day'
+                unit = f' · {b.unit}' if b.unit else ''
+                lines.append(f'{b.space.name}{unit} — {b.date.isoformat()} {when}')
+            rows.append([
+                o.order_number,
+                o.user.full_name or o.user.email,
+                o.user.email,
+                float(o.amount),
+                o.get_payment_method_display(),
+                o.get_status_display(),
+                '; '.join(lines),
+                o.receipt_url or '',
+                timezone.localtime(o.created_at).strftime('%Y-%m-%d %H:%M'),
+                timezone.localtime(o.paid_at).strftime('%Y-%m-%d %H:%M') if o.paid_at else '',
+            ])
+        return _xlsx_response('whish_orders', headers, rows)
+
+    @action(detail=True, methods=['post'], url_path='mark-paid')
+    def mark_paid(self, request, pk=None):
+        """Confirm a verified payment: the order is Paid and its held bookings
+        become confirmed + paid (a client confirmation email goes out)."""
+        order = self.get_object()
+        # Only an order still awaiting/under-review can be confirmed. A rejected
+        # order's slots are already freed (and possibly rebooked), so paying it
+        # would leave a "Paid" order with no live bookings.
+        if order.status not in (Order.Status.AWAITING, Order.Status.SUBMITTED):
+            return Response({'detail': f'This order is {order.get_status_display().lower()} '
+                                       f'and can\'t be marked paid.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        confirm_order_paid(order)
+        return Response(AdminOrderSerializer(order).data)
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        """Decline the order and release its held slot(s) (bookings cancelled,
+        any free hours refunded)."""
+        order = self.get_object()
+        if order.status == Order.Status.PAID:
+            return Response({'detail': 'Paid orders can\'t be rejected.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        order.status = Order.Status.REJECTED
+        order.note = (request.data.get('reason') or '')[:280]
+        order.save(update_fields=['status', 'note'])
+        for b in order.bookings.exclude(status=Booking.Status.CANCELLED):
+            b.status = Booking.Status.CANCELLED
+            b.save(update_fields=['status'])
+            _refund_free_hours(b)
+        return Response(AdminOrderSerializer(order).data)
+
+
 class AdminSettingsView(APIView):
     permission_classes = [IsAdminRole]
 
@@ -639,8 +775,9 @@ class AdminDashboardView(APIView):
     permission_classes = [IsAdminRole]
 
     def get(self, request):
-        today = date.today()
+        today = timezone.localdate()
         month_start = today.replace(day=1)
+        month_end = (month_start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
         last_month_end = month_start - timedelta(days=1)
         last_month_start = last_month_end.replace(day=1)
 
@@ -649,15 +786,32 @@ class AdminDashboardView(APIView):
         this_month = active.filter(date__year=today.year, date__month=today.month)
         last_month = active.filter(date__year=last_month_start.year, date__month=last_month_start.month)
 
-        revenue = this_month.filter(is_paid=True).aggregate(s=Sum('price'))['s'] or 0
-        last_revenue = last_month.filter(is_paid=True).aggregate(s=Sum('price'))['s'] or 0
+        # Revenue is driven by Payments and recognised on a cash basis: money counts
+        # toward the month it was *collected* (Order.paid_at), not the month the
+        # booking falls in. Pay-at-center bookings never go through an Order — they're
+        # booked directly and flipped paid in the Daily Bookings table — so they're
+        # added separately via `order__isnull=True`. The two legs are disjoint (a
+        # booking either belongs to an order or it doesn't), so nothing double-counts.
+        def _revenue(start, end):
+            orders = Order.objects.filter(
+                status=Order.Status.PAID, paid_at__date__gte=start, paid_at__date__lte=end,
+            ).aggregate(s=Sum('amount'))['s'] or 0
+            # Center-paid bookings have no paid_at of their own; fall back to their date.
+            center = active.filter(
+                is_paid=True, order__isnull=True, date__gte=start, date__lte=end,
+            ).aggregate(s=Sum('price'))['s'] or 0
+            return orders + center
+
+        revenue = _revenue(month_start, month_end)
+        last_revenue = _revenue(last_month_start, last_month_end)
         bookings_count = this_month.count()
         last_bookings = last_month.count()
         members = User.objects.filter(role=User.Role.MEMBER, is_approved=True).count()
 
-        # Occupancy: booked units vs capacity across active spaces this month.
+        # Occupancy right now: distinct units booked *today* vs total capacity.
         capacity = Space.objects.filter(is_active=True).aggregate(s=Sum('units'))['s'] or 0
-        occ = min(100, round((bookings_count / capacity) * 100)) if capacity else 0
+        booked_today = active.filter(date=today).count()
+        occ = min(100, round((booked_today / capacity) * 100)) if capacity else 0
 
         kpis = [
             {'icon': 'dollar-sign', 'label': 'Revenue this month', 'value': _money(revenue),
@@ -691,13 +845,14 @@ class AdminDashboardView(APIView):
             'cowork': 'linear-gradient(100deg,#C0379A,#F0822E)',
             'lounge': 'linear-gradient(100deg,#F0822E,#1FB9A6)',
         }
-        per_space = (this_month.values('space__key', 'space__name')
+        # Real per-space occupancy today: units booked today vs that space's units.
+        per_space = (active.filter(date=today).values('space__key')
                      .annotate(c=Count('id')))
         counts = {r['space__key']: r['c'] for r in per_space}
         occupancy = []
         for sp in Space.objects.filter(is_active=True):
             base = sp.units or 1
-            pct = min(100, round((counts.get(sp.key, 0) / base) * 100 + 55))  # padded for display
+            pct = min(100, round((counts.get(sp.key, 0) / base) * 100))
             occupancy.append({'name': sp.name, 'pct': f'{pct}%',
                               'bg': space_grads.get(sp.key, 'linear-gradient(100deg,#2E73E0,#C0379A)')})
 
@@ -711,9 +866,9 @@ class AdminDashboardView(APIView):
                 activity.append({'icon': 'calendar-plus', 'iconBg': 'rgba(46,115,224,.16)', 'iconColor': '#6BA4F5',
                                  'text': f'{b.user.full_name} booked {b.space.name}'
                                          + (f' · {b.unit}' if b.unit else ''), 'time': _ago(b.created_at)})
-        for u in User.objects.filter(is_approved=False, is_active=True).order_by('-date_joined')[:2]:
+        for u in User.objects.filter(role=User.Role.MEMBER, is_active=True).order_by('-date_joined')[:2]:
             activity.append({'icon': 'user-plus', 'iconBg': 'rgba(192,55,154,.16)', 'iconColor': '#E36FBF',
-                             'text': f'New sign-up from {u.full_name} — pending approval', 'time': _ago(u.date_joined)})
+                             'text': f'New member — {u.full_name}', 'time': _ago(u.date_joined)})
 
         return Response({'kpis': kpis, 'chart': chart, 'occupancy': occupancy, 'activity': activity})
 

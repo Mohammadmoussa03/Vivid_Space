@@ -112,6 +112,11 @@ DATABASES = {
         'PASSWORD': env('POSTGRES_PASSWORD', ''),
         'HOST': env('POSTGRES_HOST', 'localhost'),
         'PORT': env('POSTGRES_PORT', '5432'),
+        # Reuse connections across requests instead of paying a fresh RDS
+        # connect (~20ms) every time. CONN_HEALTH_CHECKS drops a connection
+        # that died between requests so a stale socket can't 500 a request.
+        'CONN_MAX_AGE': int(env('DB_CONN_MAX_AGE', '60')),
+        'CONN_HEALTH_CHECKS': env_bool('DB_CONN_HEALTH_CHECKS', True),
     }
 }
 
@@ -131,7 +136,10 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # Internationalization
 LANGUAGE_CODE = 'en-us'
-TIME_ZONE = 'UTC'
+# The venue's local timezone: booking availability, "now", and business hours are
+# all measured here (not UTC), so past-slot filtering matches the wall clock at
+# the center. Override per-deployment with DJANGO_TIME_ZONE.
+TIME_ZONE = env('DJANGO_TIME_ZONE', 'Asia/Beirut')
 USE_I18N = True
 USE_TZ = True
 
@@ -197,6 +205,9 @@ REST_FRAMEWORK = {
         'login_account': env('THROTTLE_LOGIN_ACCOUNT', '20/hour'),  # per account (lockout)
         'register': env('THROTTLE_REGISTER', '5/min'),
         'password_reset': env('THROTTLE_PASSWORD_RESET', '5/min'),
+        # Public, unauthenticated write endpoints that each send the owner an email.
+        'tour': env('THROTTLE_TOUR', '5/min'),
+        'customize': env('THROTTLE_CUSTOMIZE', '5/min'),
     },
 }
 

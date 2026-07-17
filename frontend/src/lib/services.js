@@ -36,6 +36,19 @@ export const requestBookingChange = (id, payload) =>
 export const updateProfile = (payload) =>
   api.patch('/auth/me/', payload).then((r) => r.data);
 
+// Whish checkout: place a paid order (creates the held booking(s)), fetch it for
+// the payment page, and upload the transfer receipt.
+export const createOrder = (payload) =>
+  api.post('/orders/', payload).then((r) => r.data);
+export const getOrder = (orderNumber) =>
+  api.get(`/orders/${orderNumber}/`).then((r) => r.data);
+export const uploadReceipt = (orderNumber, file) => {
+  const fd = new FormData();
+  fd.append('file', file);
+  return api.post(`/orders/${orderNumber}/receipt/`, fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+    .then((r) => r.data);
+};
+
 // Propose an edit to the member's package schedule (days per package) — goes to
 // the admin for review; nothing changes until they approve.
 export const requestScheduleChange = (payload) =>
@@ -76,6 +89,24 @@ export const adminTogglePaid = (id) =>
   api.post(`/admin/reservations/${id}/toggle-paid/`).then((r) => r.data);
 export const adminEditReservation = (id, payload) =>
   api.patch(`/admin/reservations/${id}/`, payload).then((r) => r.data);
+
+// Whish payment orders
+export const adminOrders = (statusFilter) =>
+  api.get('/admin/orders/', { params: statusFilter ? { status: statusFilter } : {} }).then((r) => r.data);
+export const adminMarkOrderPaid = (id) =>
+  api.post(`/admin/orders/${id}/mark-paid/`).then((r) => r.data);
+export const adminRejectOrder = (id, reason) =>
+  api.post(`/admin/orders/${id}/reject/`, { reason }).then((r) => r.data);
+
+// Excel exports (return the .xlsx as a Blob)
+export const adminExportReservations = (filter) =>
+  api.get('/admin/reservations/export/', {
+    params: filter && filter !== 'all' ? { filter } : {}, responseType: 'blob',
+  }).then((r) => r.data);
+export const adminExportOrders = (statusFilter) =>
+  api.get('/admin/orders/export/', {
+    params: statusFilter && statusFilter !== 'all' ? { status: statusFilter } : {}, responseType: 'blob',
+  }).then((r) => r.data);
 
 // Spaces
 export const adminSpaces = () => api.get('/admin/spaces/').then((r) => r.data);

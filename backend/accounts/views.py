@@ -47,7 +47,7 @@ class RegisterView(generics.CreateAPIView):
     # confirming existence; the response never echoes the user back.
     GENERIC_RESPONSE = {
         'detail': 'Thanks — if this email isn\'t already registered, your account '
-                  'has been created and will be active once an admin approves it.',
+                  'has been created and you can now log in.',
     }
 
     def create(self, request, *args, **kwargs):
@@ -228,6 +228,15 @@ class MeView(generics.RetrieveUpdateAPIView):
         return UserSerializer
 
     def update(self, request, *args, **kwargs):
+        old_email = self.get_object().email
         super().update(request, *args, **kwargs)
-        # Return the full user shape after an update.
-        return Response(UserSerializer(self.get_object()).data)
+        user = self.get_object()
+        response = Response(UserSerializer(user).data)
+        # Email is the login credential — changing it revokes existing tokens
+        # (project's "revoke on credential change" rule) and re-issues fresh
+        # cookies so the member stays signed in with new tokens.
+        if user.email != old_email:
+            blacklist_user_tokens(user)
+            refresh = RefreshToken.for_user(user)
+            set_auth_cookies(response, access=str(refresh.access_token), refresh=str(refresh))
+        return response

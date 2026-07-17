@@ -3,11 +3,11 @@ import { useNavigate } from 'react-router-dom';
 import logoColor from '../assets/vividspace-logo.png';
 import logoWhite from '../assets/vividspace-logo-white.png';
 import { useAuth } from '../context/AuthContext';
-import { MS, TONES, useVW, buildCalendar, fmtDate, apiError, safeUrl } from '../lib/ms';
+import { MS, TONES, useVW, buildCalendar, fmtDate, apiError, safeUrl, todayIso } from '../lib/ms';
 import { Reveal, RevealCard, CountUp } from '../lib/motion';
 import {
   getSite, getPublicPackages, getCategories, getPublicSpaces, getFaqs,
-  getAvailability, createBooking, submitTour, submitCustomization, getOverview, getBookings, cancelBooking,
+  getAvailability, createBooking, createOrder, submitTour, submitCustomization, getOverview, getBookings, cancelBooking,
   requestBookingChange, requestScheduleChange,
 } from '../lib/services';
 
@@ -23,11 +23,6 @@ const NAV_MENUS = [
     ],
   },
 
-   {
-    label: 'Book A Tour', key: 'book-a-tour',
-    promo: { text: 'Experience Vivid Space in Person. Discover inspiring workspaces, explore our amenities, and find the perfect environment for your business.', cta: 'Book Your Tour' },
-    columns: [{ heading: 'Tour Information', links: ['30–45 Minute Guided Tour', 'Explore Every Workspace', 'Meet Our Workspace Advisors'] }],
-  },
   {
     label: 'Who we are', key: 'about',
     promo: { text: 'Our workspaces build connection, belonging, and excitement.', cta: 'Our approach to work' },
@@ -117,7 +112,7 @@ const NAV_EASE = 'cubic-bezier(.22,.61,.36,1)';
 export default function Landing() {
   const vw = useVW();
   const nav = useNavigate();
-  const { user, isAuthed, role } = useAuth();
+  const { user, isAuthed, role, loading: authLoading } = useAuth();
 
   const [site, setSite] = useState(loadSiteCache);
   // True once we can trust the hero content: immediately if we have a cached
@@ -148,6 +143,8 @@ export default function Landing() {
 
   const contactRef = useRef(null);
   const packagesRef = useRef(null);
+  const spacesRef = useRef(null);
+  const aboutRef = useRef(null);
 
   // members / testimonials — admin-managed, falling back to the built-in set.
   const testimonials = (site?.testimonials && site.testimonials.length) ? site.testimonials : TESTIMONIALS;
@@ -155,6 +152,11 @@ export default function Landing() {
 
   // Hero copy/media, the intro statement and members are admin-editable; the rest is static.
   const introText = site?.intro_text || INTRO_FALLBACK;
+  // About us — admin-editable. Body is stored as plain text; blank lines separate
+  // paragraphs, matching how the admin types it into the textarea.
+  const about = site?.about || {};
+  const aboutParas = String(about.body || '').split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  const aboutPoints = (about.points || []).filter(Boolean);
   const stats = HERO_STATS;
   const footer = { note: FOOTER_NOTE, columns: FOOTER_COLS };
 
@@ -174,14 +176,38 @@ export default function Landing() {
     return '';
   })();
 
+  // Live availability: spaces (and their availability_status) are recomputed from
+  // the DB on every fetch, so re-pulling reflects new/cancelled/rescheduled bookings.
+  const refreshSpaces = useCallback(() => {
+    getPublicSpaces().then((d) => Array.isArray(d) && setSpaces(d)).catch(() => {});
+  }, []);
+
   /* ---- load public data ---- */
   useEffect(() => {
     getSite().then((d) => { setSite(d); try { localStorage.setItem(SITE_CACHE, JSON.stringify(d)); } catch { /* ignore */ } }).catch(() => {}).finally(() => setSiteReady(true));
     getPublicPackages().then((d) => Array.isArray(d) && setPackages(d)).catch(() => {});
     getCategories().then((d) => Array.isArray(d) && setCategories(d)).catch(() => {});
-    getPublicSpaces().then((d) => Array.isArray(d) && setSpaces(d)).catch(() => {});
     getFaqs().then((d) => { if (Array.isArray(d) && d.length) setFaqs(d); }).catch(() => {});
   }, []);
+
+  // Spaces are pulled per-session, not just on mount: the API only returns prices
+  // to a signed-in caller, so a member who logs in mid-visit needs a fresh payload
+  // (the anonymous one has no prices in it) — and a logout needs the reverse.
+  // Waits for the session check so we don't fetch twice on every load.
+  useEffect(() => {
+    if (authLoading) return;
+    refreshSpaces();
+  }, [authLoading, isAuthed, refreshSpaces]);
+
+  // Keep the home page current — re-pull availability whenever the tab regains
+  // focus (e.g. after booking/cancelling/rescheduling in another tab or the portal).
+  useEffect(() => {
+    const onFocus = () => refreshSpaces();
+    const onVisible = () => { if (!document.hidden) refreshSpaces(); };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { window.removeEventListener('focus', onFocus); document.removeEventListener('visibilitychange', onVisible); };
+  }, [refreshSpaces]);
 
   /* ---- password-reset link: open the "set new password" modal, then strip the token from the URL ---- */
   useEffect(() => {
@@ -212,6 +238,10 @@ export default function Landing() {
 
   const scrollToContact = (e) => { e?.preventDefault?.(); setOpenMenu(null); contactRef.current?.scrollIntoView({ behavior: 'smooth' }); };
   const scrollToPackages = (e) => { e?.preventDefault?.(); setOpenMenu(null); packagesRef.current?.scrollIntoView({ behavior: 'smooth' }); };
+  const scrollToSpaces = (e) => { e?.preventDefault?.(); setOpenMenu(null); spacesRef.current?.scrollIntoView({ behavior: 'smooth' }); };
+  const scrollToAbout = (e) => { e?.preventDefault?.(); setOpenMenu(null); aboutRef.current?.scrollIntoView({ behavior: 'smooth' }); };
+  // Where each nav menu lands: its own section when it has one, else the contact form.
+  const menuScrollFor = (key) => (key === 'solutions' ? scrollToPackages : key === 'about' ? scrollToAbout : scrollToContact);
 
   // Nav links collapse into a hamburger below the desktop threshold.
   const showDesktopNav = vw >= 980;
@@ -287,8 +317,12 @@ export default function Landing() {
               <nav style={{ position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%,-50%)', display: 'flex', alignItems: 'center', gap: 64 }}>
                 {NAV_MENUS.map((m) => (
                   <NavItem key={m.key} menu={m} active={openMenu === m.key} onEnter={() => setOpenMenu(m.key)}
-                    onSelect={m.key === 'solutions' ? scrollToPackages : undefined} solid={navSolid} />
+                    onSelect={m.key === 'solutions' || m.key === 'about' ? menuScrollFor(m.key) : undefined} solid={navSolid} />
                 ))}
+                {/* Plain link — no mega-menu panel, so hovering it closes any open one. */}
+                <span onMouseEnter={() => setOpenMenu(null)} style={{ display: 'inline-flex' }}>
+                  <NavTextBtn label="Daily Bookings" onClick={scrollToSpaces} solid={navSolid} />
+                </span>
               </nav>
 
               <div onMouseEnter={() => setOpenMenu(null)} style={{ display: 'flex', alignItems: 'center', gap: 'clamp(16px,2vw,28px)' }}>
@@ -326,8 +360,7 @@ export default function Landing() {
         {openMenu && (() => {
           const menu = NAV_MENUS.find((m) => m.key === openMenu);
           if (!menu) return null;
-          // Solutions links scroll to the packages section; other menus scroll to contact.
-          const menuScroll = menu.key === 'solutions' ? scrollToPackages : scrollToContact;
+          const menuScroll = menuScrollFor(menu.key);
           return (
             <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: MS.panel, borderBottom: `1px solid ${MS.line}`,
               boxShadow: '0 26px 44px rgba(20,18,16,0.09)', animation: 'ms-dropdown 220ms ease-out both' }}>
@@ -361,7 +394,7 @@ export default function Landing() {
           <div style={{ padding: '18px clamp(20px,5vw,32px) 40px', display: 'flex', flexDirection: 'column', gap: 6 }}>
             {NAV_MENUS.map((m) => {
               const open = mobileSub === m.key;
-              const menuScroll = m.key === 'solutions' ? scrollToPackages : scrollToContact;
+              const menuScroll = menuScrollFor(m.key);
               return (
                 <div key={m.key} style={{ borderBottom: `1px solid ${MS.line}` }}>
                   <button onClick={() => setMobileSub(open ? null : m.key)} aria-expanded={open}
@@ -380,6 +413,14 @@ export default function Landing() {
                 </div>
               );
             })}
+
+            {/* Plain link — no sub-list to expand, so it navigates straight away. */}
+            <div style={{ borderBottom: `1px solid ${MS.line}` }}>
+              <button onClick={(e) => { scrollToSpaces(e); setMobileNav(false); setMobileSub(null); }}
+                style={{ display: 'flex', alignItems: 'center', width: '100%', minHeight: 52, background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', padding: '4px 0', fontFamily: MS.serif, fontWeight: 700, fontSize: 20, color: MS.ink }}>
+                Daily Bookings
+              </button>
+            </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 22 }}>
               {isAuthed ? (
@@ -446,6 +487,33 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* ===== ABOUT US ===== */}
+      {(about.title || aboutParas.length > 0) && (
+        <section id="about" ref={aboutRef} style={{ background: MS.bg, padding: sectionPad, scrollMarginTop: 84 }}>
+          <div style={{ maxWidth: 1180, margin: '0 auto', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 'clamp(28px,5vw,64px)', alignItems: 'start' }}>
+            <Reveal>
+              {about.eyebrow && <p style={eyebrow}>{about.eyebrow}</p>}
+              <h2 style={h2}>{about.title}</h2>
+            </Reveal>
+            <Reveal delay={90}>
+              {aboutParas.map((p, i) => (
+                <p key={i} style={{ color: 'rgba(26,26,26,0.72)', fontSize: 'clamp(15px,1.3vw,17px)', lineHeight: 1.7, margin: i === 0 ? 0 : '16px 0 0' }}>{p}</p>
+              ))}
+              {aboutPoints.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 26 }}>
+                  {aboutPoints.map((pt, i) => (
+                    <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 11 }}>
+                      <span style={{ flex: '0 0 auto', width: 19, height: 19, marginTop: 2, borderRadius: 9999, background: 'rgba(155,126,189,0.16)', color: MS.accent, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11 }}>✓</span>
+                      <span style={{ fontSize: 15, lineHeight: 1.45 }}>{pt}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Reveal>
+          </div>
+        </section>
+      )}
+
       {/* ===== PACKAGES ===== */}
       <section id="packages" ref={packagesRef} style={{ background: MS.bg2, padding: sectionPad, scrollMarginTop: 84 }}>
         <div style={{ maxWidth: 1280, margin: '0 auto' }}>
@@ -507,10 +575,10 @@ export default function Landing() {
       </section>
 
       {/* ===== SPACES ===== */}
-      <section style={{ background: MS.bg, padding: sectionPad }}>
+      <section id="daily-bookings" ref={spacesRef} style={{ background: MS.bg, padding: sectionPad, scrollMarginTop: 84 }}>
         <div style={{ maxWidth: 1280, margin: '0 auto' }}>
           <Reveal style={{ maxWidth: 640, marginBottom: 44 }}>
-            <p style={eyebrow}>Reservations</p>
+            <p style={eyebrow}>Daily Bookings</p>
             <h2 style={h2}>Rooms for every kind of work</h2>
           </Reveal>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(272px, 1fr))', gap: 'clamp(20px,2.5vw,28px)' }}>
@@ -540,7 +608,11 @@ export default function Landing() {
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginTop: 'auto', paddingTop: 6 }}>
                       <div style={{ display: 'flex', alignItems: 'baseline', gap: 3, flexWrap: 'wrap' }}>
-                        {sp.free ? <span style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 24 }}>Free</span> : (
+                        {/* Rates are members-only — the backend also blanks them for
+                            anonymous callers, so this branch has nothing to show anyway.
+                            "Free" stays: it's a selling point, not a rate. */}
+                        {sp.free ? <span style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 24 }}>Free</span>
+                          : !isAuthed ? <span style={{ color: MS.muted, fontSize: 14 }}>Sign in to Book Your Space</span> : (
                           <>
                             {sp.day_price != null && <><span style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 24 }}>{money(sp.day_price)}</span><span style={{ color: MS.muted, fontSize: 14 }}>/ day</span></>}
                             {sp.day_price != null && sp.hour_price != null && <span style={{ color: MS.muted, fontSize: 14, margin: '0 2px' }}>·</span>}
@@ -666,7 +738,7 @@ export default function Landing() {
       {/* ===== MODALS ===== */}
       {pkgDetail && <PackageModal pkg={pkgDetail} onClose={() => setPkgDetail(null)} onContact={() => { setPkgDetail(null); scrollToContact(); }} />}
       {customizeOpen && <CustomizeModal offices={officeOptions} onClose={() => setCustomizeOpen(false)} />}
-      {bookingSpace && <BookingModal space={bookingSpace} onClose={() => setBookingSpace(null)} />}
+      {bookingSpace && <BookingModal space={bookingSpace} whishEnabled={!!site?.payments?.whish_enabled} onClose={() => { setBookingSpace(null); refreshSpaces(); }} />}
       {authOpen && <AuthModal onClose={() => { setAuthOpen(false); setResetInfo(null); }} onAuthed={onAuthed} goDashboard={goDashboard} resetInfo={resetInfo} />}
       {dashOpen && <DashboardModal user={user} onClose={() => setDashOpen(false)} />}
 
@@ -1260,9 +1332,16 @@ function AuthModal({ onClose, onAuthed, goDashboard, resetInfo }) {
     if (!name.trim() || !email.trim() || !pass.trim()) { setErr('Please fill in every field.'); return; }
     const [first, ...rest] = name.trim().split(' ');
     setBusy(true);
-    try { await register({ first_name: first, last_name: rest.join(' ') || first, email, password: pass }); setView('pending'); setErr(''); }
-    catch (ex) { setErr(apiError(ex, 'Could not create your account.')); }
-    finally { setBusy(false); }
+    try {
+      await register({ first_name: first, last_name: rest.join(' ') || first, email, password: pass });
+      // Accounts are auto-approved — sign the new member in immediately.
+      const u = await login(email, pass);
+      onAuthed(u);
+    } catch (ex) {
+      // Registration responds generically (anti-enumeration); if auto sign-in
+      // didn't go through, send them to the login screen.
+      setView('login'); setErr(apiError(ex, 'Please sign in with your new account.'));
+    } finally { setBusy(false); }
   };
   const doForgot = async (e) => {
     e.preventDefault();
@@ -1385,7 +1464,8 @@ function Centered({ icon, tone, title, body, action }) {
 /* ---------------- Booking modal (availability + create) ---------------- */
 const MAX_HOURS = 12;
 
-function BookingModal({ space, onClose }) {
+function BookingModal({ space, onClose, whishEnabled }) {
+  const navigate = useNavigate();
   // Which modes this space allows: by the hour and/or by the day.
   const modes = (() => {
     const d = space.durations && space.durations.length ? space.durations : ['hourly', 'fullday'];
@@ -1397,8 +1477,13 @@ function BookingModal({ space, onClose }) {
   const [hours, setHours] = useState(1);     // hourly: how many hours the member wants
   const [dayset, setDayset] = useState([]);  // full day: the set of days chosen on the calendar
   const [slot, setSlot] = useState(null);
+  const [unit, setUnit] = useState(null);    // which physical unit (rooms/desks) is booked
   const [attendees, setAttendees] = useState(1);
   const [avail, setAvail] = useState(null);
+  const [fdTaken, setFdTaken] = useState([]);   // full-day: unit labels booked on selected days
+  const [mem, setMem] = useState(null);         // member's plan/free-hours balance
+  const [memLoading, setMemLoading] = useState(!!space.uses_free_hours);
+  const [fdLoading, setFdLoading] = useState(false);  // full-day unit availability in flight
   const [availLoading, setAvailLoading] = useState(false);
   const [result, setResult] = useState(null); // { count, failed, first }
   const [err, setErr] = useState('');
@@ -1422,30 +1507,124 @@ function BookingModal({ space, onClose }) {
     return () => { alive = false; };
   }, [date, space.key, isHourly]);
 
-  const canConfirm = !overCap && (isHourly ? (!!date && !!slot) : dayCount >= 1);
+  // Which physical unit to book. Spaces with more than one unit make the member
+  // pick a specific one so two people can't take the same room/desk at once.
+  const unitLabels = space.unit_labels || [];
+  const needsUnit = (Number(space.units) || 1) > 1 && unitLabels.length > 0;
+
+  // For full-day bookings, load each selected day's availability so units already
+  // booked on ANY chosen day are shown as taken (a full day occupies the whole day).
+  const daysKey = dayset.join(',');
+  useEffect(() => {
+    if (isHourly || !needsUnit || dayset.length === 0) { setFdTaken([]); setFdLoading(false); return; }
+    let alive = true;
+    setFdLoading(true);
+    Promise.all(dayset.map((d) => getAvailability(space.key, d).catch(() => null)))
+      .then((results) => {
+        if (!alive) return;
+        const taken = new Set();
+        for (const r of results) for (const t of (r?.taken || [])) if (t.unit) taken.add(t.unit);
+        setFdTaken([...taken]);
+      })
+      .finally(() => { if (alive) setFdLoading(false); });
+    return () => { alive = false; };
+  }, [isHourly, needsUnit, space.key, daysKey]);
+
+  // Units already taken for the current selection. Hourly: units overlapping the
+  // chosen start → +hours window. Full day: units booked on any selected day.
+  const toMin = (t) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+  const occupied = new Set();
+  if (isHourly && slot) {
+    const s = toMin(slot);
+    const e = s + hours * 60;
+    for (const t of (avail?.taken || [])) {
+      if (!t.unit) continue;
+      const clash = t.fullday || !t.start || !t.end || (s < toMin(t.end) && toMin(t.start) < e);
+      if (clash) occupied.add(t.unit);
+    }
+  } else if (!isHourly) {
+    for (const u of fdTaken) occupied.add(u);
+  }
+  // Re-pick the unit whenever the slot/length/date/mode changes (availability shifts).
+  useEffect(() => { setUnit(null); }, [slot, hours, date, mode]);
+
+  // Cap the hours to the run of consecutive open slots from the chosen start, so a
+  // booking can't stretch into a taken/blocked slot or past the center's closing time.
+  const maxHours = (() => {
+    const list = avail?.slots || [];
+    if (!slot || !list.length) return MAX_HOURS;
+    const idx = list.findIndex((s) => s.time === slot);
+    if (idx < 0) return MAX_HOURS;
+    let run = 0;
+    for (let i = idx; i < list.length && list[i].available; i++) run++;
+    return Math.max(1, Math.min(MAX_HOURS, run));
+  })();
+  useEffect(() => { setHours((h) => Math.min(h, maxHours)); }, [maxHours]);
+
+  // Don't allow confirming a full-day booking while its per-day unit availability
+  // is still loading (the `occupied` set would be stale).
+  const unitReady = !needsUnit || (isHourly ? true : !fdLoading);
+  const unitOk = (!needsUnit || (!!unit && !occupied.has(unit))) && unitReady;
+  // Free meeting-room hours: for spaces that draw them down, load the member's
+  // balance so we can show hours-used instead of a price when it's covered.
+  const loadMem = useCallback(() => {
+    if (!space.uses_free_hours) { setMem(null); setMemLoading(false); return; }
+    setMemLoading(true);
+    getOverview().then((o) => setMem(o?.membership || null)).catch(() => {}).finally(() => setMemLoading(false));
+  }, [space.uses_free_hours]);
+  useEffect(() => { loadMem(); }, [loadMem]);
+
+  const freeTotal = mem ? (mem.effective_hours ?? mem.plan?.room_hours ?? 0) : 0;
+  const freeLeft = mem ? (mem.room_hours_left ?? 0) : 0;
+  const usesFree = space.uses_free_hours && isHourly && !!mem;   // member booking a free-hours space
+  const coveredByFree = usesFree && freeLeft >= hours;
+  const notEnoughFree = usesFree && freeLeft < hours;
+
+  const canConfirm = !overCap && unitOk && !notEnoughFree && (isHourly ? (!!date && !!slot) : dayCount >= 1);
 
   const rate = space.hour_price != null ? space.hour_price : space.day_price;
+  const rateNum = space.hour_price != null ? Number(space.hour_price) : Number(space.day_price);
+  // The amount actually payable (0 when free or covered by the plan's free hours).
+  const amountNum = (space.free || coveredByFree) ? 0
+    : (isHourly ? (rateNum || 0) * hours : (Number(space.day_price) || 0) * dayCount);
   let price = 'Pay at center';
   if (space.free) price = 'Free';
   else if (isHourly) price = money((rate || 0) * hours);
   else price = money((space.day_price || 0) * dayCount);
 
+  // Paid bookings are settled online via Whish (when the center has it enabled and
+  // once we know the member's free-hours balance, so a plan-covered slot is free).
+  const canPayWhish = whishEnabled && amountNum > 0 && !memLoading;
+  const payMethod = 'whish';
+
   const confirm = async () => {
     if (!canConfirm || busy) return;
     setErr(''); setBusy(true);
     try {
+      const unitField = needsUnit ? { unit } : {};
+      // Pay with Whish → create one order (backend makes the held bookings), then
+      // send the customer to the dedicated payment page.
+      if (canPayWhish && payMethod === 'whish') {
+        const list = isHourly
+          ? [{ space: space.key, date, duration: 'hourly', start_time: slot, hours, attendees, ...unitField }]
+          : [...dayset].sort().map((d) => ({ space: space.key, date: d, duration: 'fullday', attendees, ...unitField }));
+        const order = await createOrder({ payment_method: 'whish', bookings: list });
+        onClose();
+        navigate(`/pay/${order.order_number}`);
+        return;
+      }
       if (isHourly) {
-        const booking = await createBooking({ space: space.key, date, duration: 'hourly', start_time: slot, hours, attendees });
+        const booking = await createBooking({ space: space.key, date, duration: 'hourly', start_time: slot, hours, attendees, ...unitField });
         setResult({ count: 1, failed: [], first: booking });
       } else {
         // Book each selected day as its own full-day booking.
         const dates = [...dayset].sort();
         const failed = []; let first = null;
         for (const d of dates) {
-          try { const b = await createBooking({ space: space.key, date: d, duration: 'fullday', attendees }); if (!first) first = b; }
+          try { const b = await createBooking({ space: space.key, date: d, duration: 'fullday', attendees, ...unitField }); if (!first) first = b; }
           catch (ex) { failed.push({ date: d, msg: apiError(ex, 'Unavailable') }); }
         }
-        if (!first) { setErr(dates.length > 1 ? `None of the ${dates.length} days could be booked — they may be unavailable.` : apiError(null, 'Could not complete the booking.')); setBusy(false); return; }
+        if (!first) { setErr(dates.length > 1 ? `None of the ${dates.length} days could be booked — they may be unavailable.` : (failed[0]?.msg || 'Could not complete the booking.')); setBusy(false); return; }
         setResult({ count: dates.length - failed.length, failed, first });
       }
     } catch (ex) { setErr(apiError(ex, 'Could not complete the booking.')); }
@@ -1471,14 +1650,14 @@ function BookingModal({ space, onClose }) {
             <span style={{ width: 64, height: 64, borderRadius: 9999, background: 'rgba(63,122,90,0.14)', color: MS.green, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 30, marginBottom: 22 }}>✓</span>
             <h3 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 'clamp(24px,3vw,30px)', margin: '0 0 12px' }}>Booking confirmed</h3>
             <p style={{ color: 'rgba(26,26,26,0.7)', fontSize: 16, lineHeight: 1.6, margin: '0 0 8px', maxWidth: 380 }}>{isHourly
-              ? `${space.name} · ${fmtDate(date)}${slot ? ` at ${slot}` : ''} · ${hours} hr${hours > 1 ? 's' : ''}`
-              : `${space.name} · ${result.count} full day${result.count > 1 ? 's' : ''} booked`}</p>
+              ? `${space.name}${needsUnit && unit ? ` · ${unit}` : ''} · ${fmtDate(date)}${slot ? ` at ${slot}` : ''} · ${hours} hr${hours > 1 ? 's' : ''}`
+              : `${space.name}${needsUnit && unit ? ` · ${unit}` : ''} · ${result.count} full day${result.count > 1 ? 's' : ''} booked`}</p>
             {result.failed && result.failed.length > 0 && (
               <p style={{ color: MS.red, fontSize: 13.5, margin: '0 0 8px', maxWidth: 380 }}>{result.failed.length} day{result.failed.length > 1 ? 's were' : ' was'} unavailable and skipped.</p>
             )}
             <p style={{ color: MS.faint, fontSize: 14, margin: '0 0 30px' }}>Confirmation {result.first?.id ? `MS-${result.first.id}` : ''} — we've emailed you the details.</p>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
-              <button onClick={() => { setResult(null); setDate(null); setSlot(null); setDayset([]); }} style={ghostBtn}>Book another slot</button>
+              <button onClick={() => { setResult(null); setDate(null); setSlot(null); setDayset([]); loadMem(); }} style={ghostBtn}>Book another slot</button>
               <button onClick={onClose} style={{ ...purpleBtn, padding: '12px 28px' }}>Done</button>
             </div>
           </div>
@@ -1502,8 +1681,12 @@ function BookingModal({ space, onClose }) {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4 }}>
                   {cal.cells.map((c, i) => c.empty ? <div key={i} style={{ aspectRatio: '1' }} /> : (
                     <div key={i} style={{ aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      {(() => { const sel = isHourly ? c.sel : dayset.includes(c.iso); return (
-                        <button disabled={c.past} onClick={() => (isHourly ? setDate(c.iso) : toggleDay(c.iso))} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 10, background: sel ? MS.accent : 'transparent', color: sel ? '#fff' : (c.past ? '#C4BEB6' : MS.ink), fontSize: 14, fontWeight: sel ? 600 : 400, cursor: c.past ? 'not-allowed' : 'pointer' }}>{c.day}</button>
+                      {(() => {
+                        const sel = isHourly ? c.sel : dayset.includes(c.iso);
+                        // Full-day bookings are for upcoming days only — today's is already under way.
+                        const off = c.past || (!isHourly && c.iso === todayIso());
+                        return (
+                        <button disabled={off} onClick={() => (isHourly ? setDate(c.iso) : toggleDay(c.iso))} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 10, background: sel ? MS.accent : 'transparent', color: sel ? '#fff' : (off ? '#C4BEB6' : MS.ink), fontSize: 14, fontWeight: sel ? 600 : 400, cursor: off ? 'not-allowed' : 'pointer' }}>{c.day}</button>
                       ); })()}
                     </div>
                   ))}
@@ -1533,6 +1716,42 @@ function BookingModal({ space, onClose }) {
                 </div>
               )}
 
+              {/* Unit picker — spaces with several rooms/desks book one specific unit */}
+              {needsUnit && (() => {
+                const ready = isHourly ? !!slot : dayCount >= 1;
+                return (
+                  <div>
+                    <p style={{ fontSize: 13, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: MS.faint, margin: '0 0 14px' }}>Select a unit</p>
+                    {!ready ? (
+                      <p style={{ color: MS.faint, fontSize: 14 }}>{isHourly ? 'Pick a date and a time slot to see which units are open.' : 'Pick at least one day to choose a unit.'}</p>
+                    ) : (
+                      <>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(88px, 1fr))', gap: 8 }}>
+                          {unitLabels.map((u) => {
+                            const taken = occupied.has(u);
+                            const sel = unit === u;
+                            return (
+                              <button key={u} onClick={() => !taken && setUnit(u)} disabled={taken} title={taken ? `${u} — already booked` : u}
+                                style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, minHeight: 52, padding: '8px 6px', borderRadius: 10, border: `1px solid ${sel ? MS.accent : (taken ? '#E4DED6' : MS.line)}`, background: sel ? 'rgba(155,126,189,0.18)' : (taken ? MS.line2 : '#fff'), color: taken ? '#A9A39C' : MS.ink, fontSize: 14, fontWeight: 500, cursor: taken ? 'not-allowed' : 'pointer', opacity: taken ? 0.85 : 1 }}>
+                                <span style={{ maxWidth: '100%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: taken ? 'line-through' : 'none' }}>{u}</span>
+                                {taken && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: MS.red }}>● Booked</span>}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {!isHourly && fdLoading && (
+                          <p style={{ color: MS.faint, fontSize: 13, margin: '10px 0 0' }}>Checking availability for the selected day(s)…</p>
+                        )}
+                        {!fdLoading && occupied.size >= unitLabels.length && (
+                          <p style={{ color: MS.red, fontSize: 13.5, margin: '10px 0 0' }}>All units are booked{isHourly ? ' for this time — try another slot.' : ' for the selected day(s) — try another day.'}</p>
+                        )}
+                        {!isHourly && !fdLoading && <p style={{ color: MS.faint, fontSize: 13, margin: '10px 0 0' }}>This unit will be booked for each selected day.</p>}
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+
               {/* Booking type + how much (hours) + attendees */}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 28 }}>
                 {modes.length > 1 && (
@@ -1549,7 +1768,8 @@ function BookingModal({ space, onClose }) {
                 {isHourly ? (
                   <div>
                     <p style={capLabel}>Hours</p>
-                    <Stepper value={hours} min={1} max={MAX_HOURS} onChange={setHours} suffix={hours > 1 ? 'hrs' : 'hr'} />
+                    <Stepper value={hours} min={1} max={maxHours} onChange={setHours} suffix={hours > 1 ? 'hrs' : 'hr'} />
+                    <p style={{ fontSize: 12, color: MS.faint, margin: '8px 0 0', whiteSpace: 'nowrap', visibility: (slot && hours >= maxHours) ? 'visible' : 'hidden' }}>Max for this slot</p>
                   </div>
                 ) : (
                   <div>
@@ -1579,16 +1799,34 @@ function BookingModal({ space, onClose }) {
                   <SumRow label="Duration" value={isHourly ? `${hours} hr${hours > 1 ? 's' : ''}` : `${dayCount} full day${dayCount > 1 ? 's' : ''}`} />
                   <SumRow label="Attendees" value={String(attendees)} />
                 </div>
-                {space.uses_free_hours && isHourly && (
-                  <div style={{ background: 'rgba(63,122,90,0.12)', color: MS.green, fontSize: 13, fontWeight: 500, padding: '10px 14px', borderRadius: 10, margin: '18px 0', lineHeight: 1.4 }}>{hours} of your free meeting-room hr{hours > 1 ? 's' : ''} will be used</div>
+                {coveredByFree ? (
+                  /* Covered by the member's free meeting-room hours — show hours used, not a price. */
+                  <div style={{ background: 'rgba(63,122,90,0.12)', color: MS.green, borderRadius: 12, padding: '16px 18px', margin: '18px 0', lineHeight: 1.5 }}>
+                    <div style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 20 }}>Free with your plan</div>
+                    <div style={{ fontSize: 13.5, fontWeight: 500, marginTop: 4 }}>
+                      Using <strong>{hours} of your {freeTotal} free meeting-room hour{freeTotal === 1 ? '' : 's'}</strong> · {Math.max(0, freeLeft - hours)} hr{Math.max(0, freeLeft - hours) === 1 ? '' : 's'} left after this
+                    </div>
+                  </div>
+                ) : notEnoughFree ? (
+                  <div style={{ background: 'rgba(168,90,74,0.12)', color: MS.red, fontSize: 13, fontWeight: 500, padding: '12px 14px', borderRadius: 10, margin: '18px 0', lineHeight: 1.4 }}>
+                    You have {freeLeft} free hour{freeLeft === 1 ? '' : 's'} left, but this booking needs {hours}. Lower the hours to book it with your plan.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', borderTop: `1px solid ${MS.line}`, paddingTop: 16, margin: '18px 0' }}>
+                    <span style={{ fontSize: 15, color: MS.muted }}>Total</span>
+                    <span style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 28 }}>{price}</span>
+                  </div>
                 )}
-                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', borderTop: `1px solid ${MS.line}`, paddingTop: 16, margin: '18px 0' }}>
-                  <span style={{ fontSize: 15, color: MS.muted }}>Total</span>
-                  <span style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 28 }}>{price}</span>
-                </div>
+                {/* Paid bookings are settled online via Whish */}
+                {canPayWhish && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', borderRadius: 12, border: `1.5px solid ${MS.accent}`, background: 'rgba(155,126,189,0.10)', margin: '4px 0 18px' }}>
+                    <span style={{ flex: '0 0 auto', width: 16, height: 16, borderRadius: 9999, background: MS.accent }} />
+                    <span><span style={{ fontWeight: 600, fontSize: 14.5 }}>Pay with Whish</span><br /><span style={{ fontSize: 12.5, color: MS.muted }}>Transfer now & upload your receipt to confirm</span></span>
+                  </div>
+                )}
                 {overCap && <p style={{ background: 'rgba(168,90,74,0.12)', color: MS.red, fontSize: 13, fontWeight: 500, padding: '10px 14px', borderRadius: 10, margin: '0 0 14px', lineHeight: 1.4 }}>Capacity exceeded — max is {cap}.</p>}
                 {err && <p style={{ background: 'rgba(168,90,74,0.12)', color: MS.red, fontSize: 13, fontWeight: 500, padding: '10px 14px', borderRadius: 10, margin: '0 0 14px', lineHeight: 1.4 }}>{err}</p>}
-                <button onClick={confirm} disabled={!canConfirm || busy} style={{ width: '100%', background: (canConfirm && !busy) ? MS.accent : '#ECE8E2', color: (canConfirm && !busy) ? '#fff' : '#A9A39C', border: 'none', fontSize: 16, fontWeight: 600, padding: 15, borderRadius: 9999, cursor: (canConfirm && !busy) ? 'pointer' : 'not-allowed' }}>{busy ? 'Booking…' : 'Confirm booking'}</button>
+                <button onClick={confirm} disabled={!canConfirm || busy} style={{ width: '100%', background: (canConfirm && !busy) ? MS.accent : '#ECE8E2', color: (canConfirm && !busy) ? '#fff' : '#A9A39C', border: 'none', fontSize: 16, fontWeight: 600, padding: 15, borderRadius: 9999, cursor: (canConfirm && !busy) ? 'pointer' : 'not-allowed' }}>{busy ? 'Working…' : (canPayWhish && payMethod === 'whish' ? 'Continue to Whish payment' : 'Confirm booking')}</button>
               </div>
             </div>
           </div>
@@ -1708,7 +1946,7 @@ function DashboardModal({ user, onClose }) {
             <div style={{ height: 8, background: '#E9E4DD', borderRadius: 9999, marginTop: 14, overflow: 'hidden' }}><div style={{ height: '100%', background: MS.accent, borderRadius: 9999, width: `${freePct}%` }} /></div>)}
           {kpi('Bookings this month',
             <p style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 24, margin: 0 }}><CountUp value={Number(stats.this_month) || 0} /></p>,
-            <p style={{ color: MS.muted, fontSize: 14, margin: '6px 0 0' }}>confirmed reservations</p>)}
+            <p style={{ color: MS.muted, fontSize: 14, margin: '6px 0 0' }}>confirmed daily bookings</p>)}
           {kpi('Upcoming bookings',
             <p style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 24, margin: 0 }}><CountUp value={(overview?.upcoming || []).length} /></p>,
             <p style={{ color: MS.muted, fontSize: 14, margin: '6px 0 0' }}>scheduled ahead</p>)}
@@ -1762,7 +2000,7 @@ function DashboardModal({ user, onClose }) {
           </div>
         )}
 
-        <h2 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 'clamp(22px,3vw,28px)', margin: '0 0 20px' }}>Your reservations</h2>
+        <h2 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 'clamp(22px,3vw,28px)', margin: '0 0 20px' }}>Your daily bookings</h2>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 22 }}>
           {['upcoming', 'past', 'cancelled'].map((k) => (
             <button key={k} onClick={() => setTab(k)} style={chip(tab === k)}>{k[0].toUpperCase() + k.slice(1)}</button>
@@ -2001,15 +2239,33 @@ function ScheduleEditModal({ components, onClose, onDone }) {
 // as "change pending" until it's approved or rejected. Space/length are kept;
 // only the date (and, for hourly bookings, the start time) can change.
 function RescheduleModal({ booking, onClose, onDone }) {
-  const isHourly = booking.duration !== 'fullday';
+  // A reschedule may also change the booking's shape: which durations the space
+  // supports decides whether the member can switch between hourly and full day.
+  const modes = (() => {
+    const d = booking.space_durations && booking.space_durations.length ? booking.space_durations : ['hourly', 'fullday'];
+    return ['hourly', 'fullday'].filter((x) => d.includes(x));
+  })();
+  // The booking's current hourly length, used as the default for the stepper.
+  const initHours = (() => {
+    if (booking.start_time && booking.end_time) {
+      const [h1, m1] = booking.start_time.split(':').map(Number);
+      const [h2, m2] = booking.end_time.split(':').map(Number);
+      const len = Math.round(((h2 * 60 + m2) - (h1 * 60 + m1)) / 60);
+      return Math.max(1, Math.min(MAX_HOURS, len));
+    }
+    return 1;
+  })();
+  const [mode, setMode] = useState(booking.duration === 'fullday' ? 'fullday' : 'hourly');
   const [monthOffset, setMonthOffset] = useState(0);
   const [date, setDate] = useState(null);
   const [slot, setSlot] = useState(null);
+  const [hours, setHours] = useState(initHours);
   const [avail, setAvail] = useState(null);
   const [availLoading, setAvailLoading] = useState(false);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
+  const isHourly = mode === 'hourly';
   const cal = buildCalendar(monthOffset, date);
 
   useEffect(() => {
@@ -2029,6 +2285,22 @@ function RescheduleModal({ booking, onClose, onDone }) {
     return () => { alive = false; };
   }, [date, booking.space_key, isHourly]);
 
+  // Full-day can't fall on a day already under way; drop a today selection on switch.
+  useEffect(() => { if (!isHourly && date === todayIso()) setDate(null); }, [isHourly, date]);
+
+  // Cap hours to the run of consecutive open slots from the chosen start (can't
+  // stretch into a taken/blocked slot or past closing).
+  const maxHours = (() => {
+    const list = avail?.slots || [];
+    if (!slot || !list.length) return MAX_HOURS;
+    const idx = list.findIndex((s) => s.time === slot);
+    if (idx < 0) return MAX_HOURS;
+    let run = 0;
+    for (let i = idx; i < list.length && list[i].available; i++) run++;
+    return Math.max(1, Math.min(MAX_HOURS, run));
+  })();
+  useEffect(() => { setHours((h) => Math.min(h, maxHours)); }, [maxHours]);
+
   const canSubmit = !!date && (!isHourly || !!slot) && !busy;
   const slots = avail?.slots || [];
 
@@ -2036,7 +2308,10 @@ function RescheduleModal({ booking, onClose, onDone }) {
     if (!canSubmit) return;
     setErr(''); setBusy(true);
     try {
-      await requestBookingChange(booking.id, isHourly ? { date, start_time: slot } : { date });
+      const payload = isHourly
+        ? { date, start_time: slot, duration: 'hourly', hours }
+        : { date, duration: 'fullday' };
+      await requestBookingChange(booking.id, payload);
       onDone();
     } catch (ex) { setErr(apiError(ex, 'Could not submit your request.')); setBusy(false); }
   };
@@ -2054,6 +2329,30 @@ function RescheduleModal({ booking, onClose, onDone }) {
         <h3 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 'clamp(22px,3vw,28px)', margin: '0 0 6px', paddingRight: 40 }}>Reschedule {booking.space}</h3>
         <p style={{ color: MS.muted, fontSize: 14.5, lineHeight: 1.55, margin: '0 0 22px' }}>Currently {booking.mon} {booking.day} · {booking.time}. Pick a new {isHourly ? 'date and time' : 'day'} — your request goes to our team for review and the booking stays as-is until it's approved.</p>
 
+        {/* Booking type + hours (when the space supports both) */}
+        {(modes.length > 1 || isHourly) && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24, marginBottom: 22 }}>
+            {modes.length > 1 && (
+              <div>
+                <p style={capLabel}>Booking type</p>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {modes.map((mo) => {
+                    const on = mode === mo;
+                    return <button key={mo} type="button" onClick={() => { setMode(mo); setSlot(null); }} style={{ padding: '9px 16px', borderRadius: 9999, border: `1px solid ${on ? MS.accent : MS.line}`, background: on ? MS.accent : '#fff', color: on ? '#fff' : MS.ink, fontSize: 14, fontWeight: 500, cursor: 'pointer' }}>{mo === 'hourly' ? 'By the hour' : 'By the day'}</button>;
+                  })}
+                </div>
+              </div>
+            )}
+            {isHourly && (
+              <div>
+                <p style={capLabel}>Hours</p>
+                <Stepper value={hours} min={1} max={maxHours} onChange={setHours} suffix={hours > 1 ? 'hrs' : 'hr'} />
+                <p style={{ fontSize: 12, color: MS.faint, margin: '8px 0 0', whiteSpace: 'nowrap', visibility: (slot && hours >= maxHours) ? 'visible' : 'hidden' }}>Max for this slot</p>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Calendar */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
           <p style={{ fontSize: 13, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: MS.faint, margin: 0 }}>New date</p>
@@ -2069,7 +2368,11 @@ function RescheduleModal({ booking, onClose, onDone }) {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4 }}>
           {cal.cells.map((c, i) => c.empty ? <div key={i} style={{ aspectRatio: '1' }} /> : (
             <div key={i} style={{ aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <button disabled={c.past} onClick={() => setDate(c.iso)} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 10, background: c.sel ? MS.accent : 'transparent', color: c.sel ? '#fff' : (c.past ? '#C4BEB6' : MS.ink), fontSize: 14, fontWeight: c.sel ? 600 : 400, cursor: c.past ? 'not-allowed' : 'pointer' }}>{c.day}</button>
+              {(() => {
+                const off = c.past || (!isHourly && c.iso === todayIso());
+                return (
+                <button disabled={off} onClick={() => setDate(c.iso)} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 10, background: c.sel ? MS.accent : 'transparent', color: c.sel ? '#fff' : (off ? '#C4BEB6' : MS.ink), fontSize: 14, fontWeight: c.sel ? 600 : 400, cursor: off ? 'not-allowed' : 'pointer' }}>{c.day}</button>
+              ); })()}
             </div>
           ))}
         </div>

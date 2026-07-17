@@ -2,11 +2,13 @@ from datetime import datetime, timedelta
 
 from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework import serializers
 
 from .models import (
-    BlockedSlot, Booking, FAQ, GalleryImage, Membership, MembershipPlan,
-    PackageCategory, PromoCode, Space, TourRequest,
+    AdminSettings, BlockedSlot, Booking, FAQ, GalleryImage, Membership,
+    MembershipPlan, Order, PackageCategory, PromoCode, Space, TourRequest,
+    business_window,
 )
 
 MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -66,19 +68,37 @@ class SpaceSerializer(serializers.ModelSerializer):
     meta = serializers.CharField(read_only=True)
     free = serializers.BooleanField(source='is_free', read_only=True)
     availability_status = serializers.SerializerMethodField()
+    unit_labels = serializers.ListField(read_only=True)
 
     class Meta:
         model = Space
         fields = (
             'id', 'key', 'name', 'icon', 'icon_color', 'gradient', 'meta', 'free',
             'description', 'capacity', 'size', 'amenities', 'equipment', 'images',
-            'video_url', 'durations', 'day_price', 'hour_price', 'units', 'rates', 'is_free',
+            'video_url', 'durations', 'day_price', 'hour_price', 'units', 'unit_labels',
+            'rates', 'is_free',
             'uses_free_hours', 'is_active', 'booking_enabled', 'admin_status',
             'availability_status', 'order',
         )
 
     def get_availability_status(self, obj):
         return obj.availability_status(self.context.get('availability_date'))
+
+    def to_representation(self, instance):
+        """Rates are members-only. Blank them for anonymous callers so pricing is
+        genuinely not public — hiding it in the UI alone would still ship the
+        numbers in this payload, one devtools/curl away. `free`/`meta` stay
+        visible: "Free with plan" is a selling point, not a rate.
+
+        Fails closed — no request in context (so no way to prove who's asking)
+        means no prices."""
+        data = super().to_representation(instance)
+        user = getattr(self.context.get('request'), 'user', None)
+        if not (user and user.is_authenticated):
+            data['day_price'] = None
+            data['hour_price'] = None
+            data['rates'] = []
+        return data
 
 
 class GalleryImageSerializer(serializers.ModelSerializer):
@@ -102,6 +122,8 @@ class BookingSerializer(serializers.ModelSerializer):
     day = serializers.SerializerMethodField()
     space = serializers.SerializerMethodField()
     space_key = serializers.CharField(source='space.key', read_only=True)
+    space_durations = serializers.JSONField(source='space.durations', read_only=True)
+    space_uses_free_hours = serializers.BooleanField(source='space.uses_free_hours', read_only=True)
     time = serializers.SerializerMethodField()
     cost = serializers.SerializerMethodField()
     free = serializers.BooleanField(source='is_free', read_only=True)
@@ -113,7 +135,8 @@ class BookingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Booking
         fields = (
-            'id', 'mon', 'day', 'space', 'space_key', 'unit', 'date',
+            'id', 'mon', 'day', 'space', 'space_key', 'space_durations',
+            'space_uses_free_hours', 'unit', 'date',
             'duration', 'start_time', 'end_time', 'time', 'cost',
             'attendees', 'free', 'status', 'when',
             'change_requested', 'requested',
@@ -164,6 +187,15 @@ def _slot_end(booking_date, start, hours):
     return (datetime.combine(booking_date, start) + timedelta(hours=hours)).time()
 
 
+def _hhmm_to_minutes(value, fallback):
+    """Parse an 'HH:MM' string to minutes-since-midnight, else return fallback."""
+    try:
+        h, m = str(value).split(':')[:2]
+        return int(h) * 60 + int(m)
+    except (ValueError, AttributeError):
+        return fallback
+
+
 class BookingCreateSerializer(serializers.ModelSerializer):
     space = serializers.SlugRelatedField(slug_field='key', queryset=Space.objects.filter(is_active=True))
     # Length of an hourly booking; defaults to 1. Ignored for full-day bookings.
@@ -193,11 +225,22 @@ class BookingCreateSerializer(serializers.ModelSerializer):
             return start < b.end_time and b.start_time < end
 
         conflicting = [b for b in qs if overlaps(b)]
-        if unit:
-            if any((b.unit or '').lower() == unit.lower() for b in conflicting):
+        capacity = space.units or 1
+        # How many physical units are already occupied during the overlap: distinct
+        # named units + each unnamed ("some unit") booking. A named unit can't be
+        # taken twice; an unnamed one still consumes capacity. This makes capacity
+        # binding even when a (possibly arbitrary) unit label is supplied — so a
+        # bogus unit name can't bypass the ceiling.
+        named = {(b.unit or '').strip().lower() for b in conflicting if (b.unit or '').strip()}
+        unitless = sum(1 for b in conflicting if not (b.unit or '').strip())
+        occupied = len(named) + unitless
+        if unit and unit.strip():
+            if unit.strip().lower() in named:
                 return 'That unit is already booked for the selected time.'
+            if occupied >= capacity:
+                return 'That time slot is fully booked.'
             return None
-        if len(conflicting) >= (space.units or 1):
+        if occupied >= capacity:
             return 'That time slot is fully booked.'
         return None
 
@@ -220,18 +263,52 @@ class BookingCreateSerializer(serializers.ModelSerializer):
                 {'duration': f'{space.name} does not support "{duration}" bookings.'}
             )
 
+        # A space the admin has disabled or marked temporarily unavailable can't be
+        # booked, even via a direct API call (the queryset only filters is_active).
+        if not space.booking_enabled or space.admin_status == Space.AdminStatus.TEMPORARILY_UNAVAILABLE:
+            raise serializers.ValidationError(
+                {'detail': f'{space.name} is not available for booking right now.'}
+            )
+
         attendees = attrs.get('attendees')
         if attendees and space.capacity and attendees > space.capacity:
             raise serializers.ValidationError(
                 {'attendees': f'{space.name} holds up to {space.capacity} people.'}
             )
 
+        # Reject bookings in the past — a whole past day, or (for today) a slot
+        # whose start time has already elapsed.
+        now = timezone.localtime()
+        today = now.date()
+        booking_date = attrs['date']
+        if booking_date < today:
+            raise serializers.ValidationError({'date': 'Pick a date in the future.'})
+
         if duration == Booking.Duration.HOURLY:
             start = attrs.get('start_time')
             if not start:
                 raise serializers.ValidationError({'start_time': 'Pick a start time for hourly bookings.'})
+            if booking_date == today and start <= now.time():
+                raise serializers.ValidationError(
+                    {'start_time': 'That time has already passed — pick a later slot.'}
+                )
+            # An hourly booking can't run past the center's closing time (to the minute).
+            open_h, close_h, closed, close_str = business_window(booking_date)
+            if closed:
+                raise serializers.ValidationError({'detail': 'The center is closed on that day.'})
+            close_min = _hhmm_to_minutes(close_str, close_h * 60)
+            if start.hour * 60 + start.minute + hours * 60 > close_min:
+                raise serializers.ValidationError(
+                    {'hours': f'That runs past closing ({close_str}). Reduce the hours.'}
+                )
             end = _slot_end(attrs['date'], start, hours)
         else:
+            # A full day that's already under way isn't a full day — require an
+            # upcoming date.
+            if booking_date == today:
+                raise serializers.ValidationError(
+                    {'date': 'Full-day bookings must be for an upcoming day.'}
+                )
             start = end = None
 
         conflict = self._overlap_conflict(space, attrs['date'], attrs.get('unit', ''), start, end)
@@ -280,6 +357,19 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         validated_data['user'] = user
 
         with transaction.atomic():
+            # Serialize concurrent creates for this space/day and re-check the slot
+            # under the lock — validate() ran without a lock, so two simultaneous
+            # requests could otherwise both pass and double-book (no DB constraint
+            # covers per-unit time slots).
+            list(Booking.objects.select_for_update()
+                 .filter(space=space, date=validated_data['date'])
+                 .exclude(status=Booking.Status.CANCELLED))
+            conflict = self._overlap_conflict(
+                space, validated_data['date'], validated_data.get('unit', ''),
+                start, validated_data.get('end_time'))
+            if conflict:
+                raise serializers.ValidationError({'detail': conflict})
+
             deducted = 0
             if space.uses_free_hours and duration == Booking.Duration.HOURLY:
                 membership = (Membership.objects.select_for_update()
@@ -300,6 +390,38 @@ class BookingCreateSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         return BookingSerializer(instance, context=self.context).data
+
+
+class OrderSerializer(serializers.ModelSerializer):
+    """Read shape for the Whish payment page and the member's order view."""
+
+    bookings = BookingSerializer(many=True, read_only=True)
+    amount_display = serializers.SerializerMethodField()
+    status_label = serializers.SerializerMethodField()
+    whish = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Order
+        fields = (
+            'order_number', 'amount', 'amount_display', 'payment_method', 'status',
+            'status_label', 'receipt_url', 'created_at', 'paid_at', 'bookings', 'whish',
+        )
+
+    def get_amount_display(self, obj):
+        return f'${obj.amount:.2f}'
+
+    def get_status_label(self, obj):
+        return obj.get_status_display()
+
+    def get_whish(self, obj):
+        """The center's Whish account + the exact transfer message for this order."""
+        s = AdminSettings.load()
+        return {
+            'number': s.whish_number,
+            'qr': s.whish_qr_url,
+            'name': s.whish_account_name,
+            'message': obj.order_number,
+        }
 
 
 class TourRequestCreateSerializer(serializers.ModelSerializer):

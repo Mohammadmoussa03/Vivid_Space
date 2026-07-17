@@ -179,3 +179,19 @@ class HardeningTests(APITestCase):
         resp = self.client.post(reverse('admin-user-list'), {'email': 'x@y.com'},
                                 format='json', **self._csrf_headers())
         self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+class RegistrationApprovalTests(APITestCase):
+    def test_new_user_is_auto_approved_and_can_login(self):
+        r = self.client.post(reverse('register'), {
+            'email': 'newbie@example.com', 'password': 'S3cure-pass!',
+            'first_name': 'New', 'last_name': 'Bie',
+        }, format='json')
+        self.assertEqual(r.status_code, status.HTTP_201_CREATED)
+        u = User.objects.get(email='newbie@example.com')
+        self.assertTrue(u.is_approved)
+        # Can log in immediately (no admin approval gate).
+        login = self.client.post(reverse('login'), {
+            'email': 'newbie@example.com', 'password': 'S3cure-pass!',
+        }, format='json')
+        self.assertEqual(login.status_code, status.HTTP_200_OK)

@@ -8,6 +8,9 @@ from .views import (
     CustomizationRequestView,
     FAQListView,
     GalleryListView,
+    OrderCreateView,
+    OrderDetailView,
+    OrderReceiptView,
     OverviewView,
     PackageViewSet,
     ScheduleChangeView,
@@ -31,5 +34,8 @@ urlpatterns = [
     path('customize/', CustomizationRequestView.as_view(), name='customize'),
     path('availability/', AvailabilityView.as_view(), name='availability'),
     path('site/', SiteConfigView.as_view(), name='site-config'),
+    path('orders/', OrderCreateView.as_view(), name='order-create'),
+    path('orders/<str:order_number>/', OrderDetailView.as_view(), name='order-detail'),
+    path('orders/<str:order_number>/receipt/', OrderReceiptView.as_view(), name='order-receipt'),
     path('', include(router.urls)),
 ]

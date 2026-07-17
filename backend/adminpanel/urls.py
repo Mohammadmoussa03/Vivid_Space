@@ -8,6 +8,7 @@ from .views import (
     AdminDashboardView,
     AdminFAQViewSet,
     AdminGalleryViewSet,
+    AdminOrderViewSet,
     AdminPackageCategoryViewSet,
     AdminPackageViewSet,
     AdminPromoCodeViewSet,
@@ -24,6 +25,7 @@ router = DefaultRouter()
 router.register('users', AdminUserViewSet, basename='admin-user')
 router.register('clients', AdminClientViewSet, basename='admin-client')
 router.register('reservations', AdminReservationViewSet, basename='admin-reservation')
+router.register('orders', AdminOrderViewSet, basename='admin-order')
 router.register('spaces', AdminSpaceViewSet, basename='admin-space')
 router.register('packages', AdminPackageViewSet, basename='admin-package')
 router.register('categories', AdminPackageCategoryViewSet, basename='admin-category')

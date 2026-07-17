@@ -1,9 +1,29 @@
-from datetime import date
+from datetime import date, time as dtime
 
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
 from django.utils.text import slugify
+
+_WEEKDAY_KEYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+
+
+def _hour_of(value, fallback):
+    """Parse an 'HH:MM' business-hours string to an integer hour."""
+    try:
+        return int(str(value).split(':')[0])
+    except (ValueError, AttributeError, IndexError):
+        return fallback
+
+
+def business_window(day):
+    """The center's (open_hour, close_hour, closed, close_str) for a given date,
+    read from AdminSettings.business_hours. `closed` True means no bookings that day."""
+    cfg = (AdminSettings.load().business_hours or {}).get(_WEEKDAY_KEYS[day.weekday()], {})
+    if cfg.get('closed'):
+        return (None, None, True, None)
+    open_str, close_str = cfg.get('open', '09:00'), cfg.get('close', '18:00')
+    return (_hour_of(open_str, 9), _hour_of(close_str, 18), False, close_str)
 
 
 class PackageCategory(models.Model):
@@ -232,6 +252,9 @@ class Space(models.Model):
     hour_price = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
     # Number of bookable units of this space (rooms / desks).
     units = models.PositiveIntegerField(default=1)
+    # Optional labels for each individual unit (e.g. ["9A", "11B"]). When empty we
+    # fall back to "Unit 1"…"Unit N" so a member can still pick a specific unit.
+    unit_names = models.JSONField(default=list, blank=True)
     # Editable rate rows shown in admin, e.g. [{"label": "Per hour", "price": "40"}].
     rates = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True)
@@ -252,24 +275,129 @@ class Space(models.Model):
     def meta(self):
         return 'Free with plan' if self.is_free else 'Pay at center'
 
+    @property
+    def unit_labels(self):
+        """The bookable unit identities: admin-set names, padded up to `units`
+        with names derived from the space ("Dedicated Desk 1", "Dedicated Desk 2"),
+        and capped at `units`.
+
+        Padding matters: an admin who names only some of a space's units (2 units
+        but only "1A" typed) would otherwise leave the rest with no label, and a
+        unit with no label can't be picked — the room exists and counts toward
+        capacity but is unbookable. Auto labels are derived from the space name
+        rather than a bare "Unit N" so they mean something wherever they surface
+        (picker, admin tables, emails). They skip any name the admin already used,
+        so padding can never mint a duplicate."""
+        names = [str(n).strip() for n in (self.unit_names or []) if str(n).strip()]
+        total = self.units or 1
+        if len(names) >= total:
+            return names[:total]
+        used = {n.lower() for n in names}
+        labels = list(names)
+        # Number auto labels by position, so the 2nd unit reads "<space> 2".
+        i = len(labels) + 1
+        while len(labels) < total:
+            candidate = self.auto_unit_label(i)
+            if candidate.lower() not in used:
+                labels.append(candidate)
+                used.add(candidate.lower())
+            i += 1
+        return labels
+
+    def auto_unit_label(self, index):
+        """The default name for unit `index` (1-based), e.g. "Dedicated Desk 2".
+        Falls back to "Unit N" for an unnamed space."""
+        base = (self.name or '').strip()
+        return f'{base} {index}' if base else f'Unit {index}'
+
+    def assign_missing_units(self):
+        """Stamp an explicit unit on this space's unit-less bookings.
+
+        Bookings taken while the space had one unit carry `unit = ''` — the modal
+        only asks for a unit once there are several. That's unambiguous with one
+        unit, but the moment the space gains another, an unnamed booking can no
+        longer be told apart from a named one on the same room, and capacity
+        checks will happily let both exist. Call this after `units` grows. Each
+        unit-less booking takes a unit that was actually free at its time.
+
+        Returns the number of bookings updated."""
+        if (self.units or 1) <= 1:
+            return 0
+        labels = self.unit_labels
+        rows = list(self.bookings.exclude(status=Booking.Status.CANCELLED)
+                    .order_by('date', 'start_time', 'id'))
+        changed = 0
+        for booking in rows:
+            if (booking.unit or '').strip():
+                continue
+            taken = {(b.unit or '').strip().lower()
+                     for b in rows
+                     if b.id != booking.id and b.date == booking.date
+                     and (b.unit or '').strip() and booking.overlaps(b)}
+            free = next((l for l in labels if l.lower() not in taken), None)
+            if free is None:
+                continue  # genuinely full at that time — don't invent a clash
+            booking.unit = free
+            booking.save(update_fields=['unit'])
+            changed += 1
+        return changed
+
     def availability_status(self, day=None):
         """Coarse availability badge for a given day (defaults to today):
-        `temporarily_unavailable`, `blocked`, `fully_booked`, or `available`."""
+        `temporarily_unavailable`, `blocked`, `fully_booked`, or `available`.
+
+        Time-aware: an hourly space stays `available` as long as *some* future
+        slot still has capacity — a partial booking (e.g. 12:00–15:00 in a
+        single-unit room) must not black out the whole day."""
         day = day or timezone.localdate()
         if (not self.is_active or not self.booking_enabled
                 or self.admin_status == self.AdminStatus.TEMPORARILY_UNAVAILABLE):
             return 'temporarily_unavailable'
-        day_blocks = BlockedSlot.objects.filter(date=day).filter(
+        day_blocks = list(BlockedSlot.objects.filter(date=day).filter(
             models.Q(space=self) | models.Q(space__isnull=True)
-        )
+        ))
         if any(b.start_time is None or b.end_time is None for b in day_blocks):
             return 'blocked'
-        booked = self.bookings.filter(date=day).exclude(
-            status=Booking.Status.CANCELLED
-        ).count()
-        if booked >= (self.units or 1):
-            return 'fully_booked'
-        return 'available'
+
+        now = timezone.localtime()
+        if day < now.date():
+            return 'fully_booked'  # the day is over — nothing left to book
+
+        bookings = list(self.bookings.filter(date=day).exclude(status=Booking.Status.CANCELLED))
+        capacity = self.units or 1
+        durations = self.durations or ['hourly', 'fullday']
+
+        # Distinct physical units occupied that day (named once + each unnamed).
+        day_named = {(b.unit or '').strip().lower() for b in bookings if (b.unit or '').strip()}
+        day_occupied = len(day_named) + sum(1 for b in bookings if not (b.unit or '').strip())
+
+        # A full-day booking is still possible while any unit is free all day.
+        if 'fullday' in durations and day_occupied < capacity:
+            return 'available'
+
+        # Otherwise the space is available if any hourly slot within business
+        # hours still has spare capacity and hasn't already elapsed / been blocked.
+        if 'hourly' in durations:
+            cfg = (AdminSettings.load().business_hours or {}).get(_WEEKDAY_KEYS[day.weekday()], {})
+            if not cfg.get('closed'):
+                open_h = _hour_of(cfg.get('open', '09:00'), 9)
+                close_h = _hour_of(cfg.get('close', '18:00'), 18)
+                for h in range(open_h, close_h):
+                    slot_start = dtime(h, 0)
+                    slot_end = dtime(h + 1, 0) if h + 1 < 24 else dtime(23, 59)
+                    if day == now.date() and slot_start <= now.time():
+                        continue
+                    if any(bl.covers(slot_start, slot_end) for bl in day_blocks):
+                        continue
+                    overlapping = sum(
+                        1 for b in bookings
+                        if b.duration == Booking.Duration.FULLDAY or not b.start_time or not b.end_time
+                        or (slot_start < b.end_time and b.start_time < slot_end)
+                    )
+                    if overlapping < capacity:
+                        return 'available'
+
+        return 'fully_booked'
 
 
 class Booking(models.Model):
@@ -306,6 +434,11 @@ class Booking(models.Model):
     change_requested = models.BooleanField(default=False)
     requested_date = models.DateField(null=True, blank=True)
     requested_start_time = models.TimeField(null=True, blank=True)
+    # A reschedule may also change the booking's shape: hourly ↔ full day, and how
+    # many hours. Null means "keep the current duration/length".
+    requested_duration = models.CharField(
+        max_length=10, choices=Duration.choices, null=True, blank=True)
+    requested_hours = models.PositiveIntegerField(null=True, blank=True)
     # Whether this booking was free with the plan (snapshot of the space at booking time).
     is_free = models.BooleanField(default=True)
     # Free meeting-room hours drawn down by this booking (for exact refund on cancel).
@@ -313,6 +446,11 @@ class Booking(models.Model):
     price = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
     # Payment settled at the center (only meaningful for paid bookings).
     is_paid = models.BooleanField(default=False)
+    # The checkout this booking belongs to (set when paid via Whish; groups the
+    # day(s) of one order under a single order number/amount). Null = no online order.
+    order = models.ForeignKey(
+        'Order', on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings'
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -322,13 +460,22 @@ class Booking(models.Model):
     def __str__(self):
         return f'{self.user.email} · {self.space.name} · {self.date}'
 
+    def overlaps(self, other):
+        """True when this and another same-day booking share any time. A full-day
+        booking (or one missing times) occupies the whole day."""
+        if self.duration == self.Duration.FULLDAY or not self.start_time or not self.end_time:
+            return True
+        if other.duration == self.Duration.FULLDAY or not other.start_time or not other.end_time:
+            return True
+        return self.start_time < other.end_time and other.start_time < self.end_time
+
     @property
     def is_cancelled(self):
         return self.status == self.Status.CANCELLED
 
     @property
     def is_past(self):
-        return not self.is_cancelled and self.date < date.today()
+        return not self.is_cancelled and self.date < timezone.localdate()
 
     @property
     def when(self):
@@ -351,6 +498,50 @@ class Booking(models.Model):
         if self.is_pending:
             return 'pending'
         return 'completed' if self.is_past else 'confirmed'
+
+
+class Order(models.Model):
+    """A payment order grouping the booking(s) from one checkout.
+
+    Used by the manual "Pay with Whish" flow: the customer places the order (slot
+    held, status Awaiting payment), transfers on Whish and uploads a receipt, then
+    an admin verifies and marks it paid — which confirms the underlying bookings."""
+
+    class Status(models.TextChoices):
+        AWAITING = 'awaiting_payment', 'Awaiting payment'
+        SUBMITTED = 'submitted', 'Receipt submitted'
+        PAID = 'paid', 'Paid'
+        REJECTED = 'rejected', 'Rejected'
+
+    class Method(models.TextChoices):
+        WHISH = 'whish', 'Whish'
+        CENTER = 'center', 'Pay at center'
+
+    order_number = models.CharField(max_length=20, unique=True, blank=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='orders'
+    )
+    amount = models.DecimalField(max_digits=9, decimal_places=2, default=0)
+    payment_method = models.CharField(max_length=10, choices=Method.choices, default=Method.WHISH)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.AWAITING)
+    # Uploaded receipt image, stored as a /media URL (same convention as gallery uploads).
+    receipt_url = models.CharField(max_length=500, blank=True)
+    note = models.CharField(max_length=280, blank=True)  # admin reason on reject, etc.
+    created_at = models.DateTimeField(auto_now_add=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return self.order_number or f'Order #{self.pk}'
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        # Human-friendly, unique order number derived from the pk (e.g. ORD-10482).
+        if not self.order_number:
+            self.order_number = f'ORD-{10000 + self.pk}'
+            super().save(update_fields=['order_number'])
 
 
 # ---- Default page content for the (editable) SiteContent singleton ----
@@ -408,6 +599,15 @@ def _default_footer():
             {'title': 'Support', 'links': ['Help centre', 'Book a tour', 'Members', 'Community']},
         ],
     }
+
+
+# Placeholder About copy. Intentionally not written as real marketing prose: the
+# company story is the owner's to tell, and invented history would ship as fact.
+_ABOUT_TITLE = 'Your headline here'
+_ABOUT_BODY = (
+    'Replace this with your company story — who you are, why you started, and '
+    'what makes your spaces different. Edit it in Admin → Website content → About us.'
+)
 
 
 def _default_headings():
@@ -475,6 +675,14 @@ class SiteContent(models.Model):
     footer = models.JSONField(default=_default_footer, blank=True)
     headings = models.JSONField(default=_default_headings, blank=True)
     nav_menus = models.JSONField(default=_default_nav_menus, blank=True)
+    # "About us" section. Separate fields rather than one JSON blob so the admin
+    # edits plain inputs instead of raw JSON. Defaults are deliberate placeholders
+    # — the real story is the owner's to write.
+    about_eyebrow = models.CharField(max_length=80, default='About us', blank=True)
+    about_title = models.CharField(max_length=200, default=_ABOUT_TITLE, blank=True)
+    about_body = models.TextField(default=_ABOUT_BODY, blank=True)
+    # Optional short bullets shown beside the body, e.g. ["Founded 2021", "3 locations"].
+    about_points = models.JSONField(default=list, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -515,6 +723,12 @@ class AdminSettings(models.Model):
     # prefilled message. When the number is blank the floating bubble is hidden.
     whatsapp_number = models.CharField(max_length=40, blank=True)
     whatsapp_message = models.CharField(max_length=280, blank=True)
+    # "Pay with Whish" checkout: when enabled, paid bookings can be settled by a
+    # manual Whish transfer to this account (verified by admin from the receipt).
+    whish_enabled = models.BooleanField(default=False)
+    whish_number = models.CharField(max_length=40, blank=True)       # receiving phone
+    whish_qr_url = models.CharField(max_length=500, blank=True)      # uploaded QR image URL
+    whish_account_name = models.CharField(max_length=120, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

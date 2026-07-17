@@ -1,14 +1,21 @@
+import os
+import uuid
 from datetime import date, datetime, time, timedelta
 
+from django.core.files.storage import default_storage
+from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import (
     AdminSettings, BlockedSlot, Booking, CustomizationRequest, FAQ, GalleryImage,
-    Membership, MembershipPlan, PackageCategory, SiteContent, Space,
+    Membership, MembershipPlan, Order, PackageCategory, SiteContent, Space,
+    business_window,
 )
 from .serializers import (
     BookingCreateSerializer,
@@ -17,6 +24,7 @@ from .serializers import (
     FAQSerializer,
     GalleryImageSerializer,
     MembershipSerializer,
+    OrderSerializer,
     PackageCategorySerializer,
     PackagePublicSerializer,
     SpaceSerializer,
@@ -72,7 +80,9 @@ class SpaceViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
             spaces = [s for s in spaces if s.availability_status(day) == want]
         elif day:
             spaces = [s for s in spaces if s.availability_status(day) == 'available']
-        return Response(self.get_serializer(spaces, many=True).data)
+        resp = Response(self.get_serializer(spaces, many=True).data)
+        resp['Cache-Control'] = 'no-store'  # availability_status is live — don't cache
+        return resp
 
 
 class PackageViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
@@ -146,6 +156,12 @@ class SiteConfigView(APIView):
             'footer': content.footer,
             'headings': content.headings,
             'nav_menus': content.nav_menus,
+            'about': {
+                'eyebrow': content.about_eyebrow,
+                'title': content.about_title,
+                'body': content.about_body,
+                'points': content.about_points,
+            },
             'contact': {
                 'email': s.contact_email,
                 'phones': s.phones,
@@ -156,6 +172,10 @@ class SiteConfigView(APIView):
             },
             'business_hours': s.business_hours,
             'opening_hours': s.opening_hours,
+            'payments': {
+                # Whish is offered only when enabled AND a receiving number is set.
+                'whish_enabled': bool(s.whish_enabled and s.whish_number),
+            },
         })
 
 
@@ -164,6 +184,7 @@ class TourRequestCreateView(mixins.CreateModelMixin, viewsets.GenericViewSet):
 
     serializer_class = TourRequestCreateSerializer
     permission_classes = [permissions.AllowAny]
+    throttle_scope = 'tour'
 
     def perform_create(self, serializer):
         tour = serializer.save()
@@ -177,6 +198,7 @@ class CustomizationRequestView(APIView):
     """
 
     permission_classes = [permissions.AllowAny]
+    throttle_scope = 'customize'
 
     def post(self, request):
         serializer = CustomizationRequestSerializer(data=request.data)
@@ -238,9 +260,15 @@ class AvailabilityView(APIView):
         blocks = list(BlockedSlot.objects.filter(date=day)
                       .filter(Q(space=space) | Q(space__isnull=True)))
 
-        taken = [{'start': b.start_time.strftime('%H:%M'),
+        # "Now" for past-slot filtering: only relevant when the date is today.
+        now = timezone.localtime()
+        is_today = day == now.date()
+        is_past_day = day < now.date()
+
+        taken = [{'start': b.start_time.strftime('%H:%M') if b.start_time else None,
                   'end': b.end_time.strftime('%H:%M') if b.end_time else None,
-                  'fullday': b.duration == Booking.Duration.FULLDAY}
+                  'fullday': b.duration == Booking.Duration.FULLDAY,
+                  'unit': b.unit or ''}
                  for b in bookings]
 
         blocked = [{'start': b.start_time.strftime('%H:%M') if b.start_time else None,
@@ -249,7 +277,7 @@ class AvailabilityView(APIView):
 
         capacity = space.units or 1
         slots = []
-        if not closed:
+        if not closed and not is_past_day:
             for h in range(open_h, close_h):
                 slot_start = time(h, 0)
                 slot_end = time(h + 1, 0) if h + 1 < 24 else time(23, 59)
@@ -259,15 +287,24 @@ class AvailabilityView(APIView):
                     or (slot_start < b.end_time and b.start_time < slot_end)
                 )
                 is_blocked = any(bl.covers(slot_start, slot_end) for bl in blocks)
+                is_past = is_today and slot_start <= now.time()
                 slots.append({
                     'time': slot_start.strftime('%H:%M'),
-                    'available': (not is_blocked) and overlapping < capacity,
+                    'available': (not is_blocked) and (not is_past) and overlapping < capacity,
+                    'past': is_past,
                 })
 
         fullday_taken = any(b.duration == Booking.Duration.FULLDAY for b in bookings)
         fullday_blocked = any(bl.covers(None, None) for bl in blocks)
+        # Distinct physical units occupied at any point that day (a new full-day
+        # booking needs a unit free all day). Count named units once + each unnamed
+        # booking — not raw rows, so two hourly bookings of the *same* unit don't
+        # look like two occupied units.
+        day_named = {(b.unit or '').strip().lower() for b in bookings if (b.unit or '').strip()}
+        day_unitless = sum(1 for b in bookings if not (b.unit or '').strip())
+        day_occupied = len(day_named) + day_unitless
 
-        return Response({
+        resp = Response({
             'space': space.key,
             'date': date_str,
             'closed': closed,
@@ -275,9 +312,17 @@ class AvailabilityView(APIView):
             'slots': slots,
             'taken': taken,
             'blocked': blocked,
-            'fullday_available': (not closed) and not fullday_taken and not fullday_blocked
-                                 and len(bookings) < capacity,
+            'units': capacity,
+            'unit_labels': space.unit_labels,
+            # A full day is only bookable for an upcoming date — never today (the
+            # day is already under way) or the past.
+            'fullday_available': (not closed) and day > now.date() and not fullday_taken
+                                 and not fullday_blocked and day_occupied < capacity,
         })
+        # Availability is time-sensitive and booking-dependent — never let a browser
+        # or proxy serve a stale copy.
+        resp['Cache-Control'] = 'no-store'
+        return resp
 
 
 class BookingViewSet(viewsets.ModelViewSet):
@@ -290,7 +335,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         qs = Booking.objects.filter(user=self.request.user).select_related('space')
         when = self.request.query_params.get('when')
         if when in ('upcoming', 'past', 'cancelled'):
-            today = date.today()
+            today = timezone.localdate()
             if when == 'cancelled':
                 qs = qs.filter(status=Booking.Status.CANCELLED)
             elif when == 'upcoming':
@@ -349,36 +394,202 @@ class BookingViewSet(viewsets.ModelViewSet):
         if not new_date:
             return Response({'detail': 'Pick a valid date.'},
                             status=status.HTTP_400_BAD_REQUEST)
-        if new_date < date.today():
+        now = timezone.localtime()
+        today = now.date()
+        if new_date < today:
             return Response({'detail': 'Pick a date in the future.'},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        # Reschedules keep the booking's duration type and length — we only move
-        # it. For hourly bookings the member picks a new start time; the window
-        # slides by the same number of hours.
+        # A reschedule can also change the booking's shape — hourly ↔ full day and,
+        # for hourly, the number of hours. Falls back to the current duration.
+        space = booking.space
+        duration = request.data.get('duration') or booking.duration
+        if duration not in (Booking.Duration.HOURLY, Booking.Duration.FULLDAY):
+            return Response({'detail': 'Choose an hourly or full-day booking.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if space.durations and duration not in space.durations:
+            return Response({'detail': f'{space.name} can\'t be booked "{duration}".'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
         start = end = None
-        if booking.duration == Booking.Duration.HOURLY:
+        hours = None
+        if duration == Booking.Duration.HOURLY:
             start = _parse_time(request.data.get('start_time'))
             if not start:
                 return Response({'detail': 'Pick a start time.'},
                                 status=status.HTTP_400_BAD_REQUEST)
-            end = _slot_end_time(new_date, start, _booking_length_hours(booking))
+            if new_date == today and start <= now.time():
+                return Response({'detail': 'That time has already passed — pick a later slot.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            try:
+                hours = int(request.data.get('hours') or _booking_length_hours(booking))
+            except (TypeError, ValueError):
+                hours = _booking_length_hours(booking)
+            hours = max(1, min(12, hours))
+            open_h, close_h, closed, close_str = business_window(new_date)
+            if closed:
+                return Response({'detail': 'The center is closed on that day.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if start.hour * 60 + start.minute + hours * 60 > close_h * 60:
+                return Response({'detail': f'That runs past closing ({close_str}). Reduce the hours.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            end = _slot_end_time(new_date, start, hours)
+        else:
+            # A full day that's already under way isn't a full day.
+            if new_date == today:
+                return Response({'detail': 'Full-day bookings must be for an upcoming day.'},
+                                status=status.HTTP_400_BAD_REQUEST)
 
         conflict = BookingCreateSerializer._overlap_conflict(
-            booking.space, new_date, booking.unit, start, end, exclude_pk=booking.pk,
+            space, new_date, booking.unit, start, end, exclude_pk=booking.pk,
         )
         if conflict:
             return Response({'detail': conflict}, status=status.HTTP_400_BAD_REQUEST)
-        blocked = BookingCreateSerializer._blocked(booking.space, new_date, start, end)
+        blocked = BookingCreateSerializer._blocked(space, new_date, start, end)
         if blocked:
             return Response({'detail': blocked}, status=status.HTTP_400_BAD_REQUEST)
 
         booking.change_requested = True
         booking.requested_date = new_date
         booking.requested_start_time = start
-        booking.save(update_fields=['change_requested', 'requested_date', 'requested_start_time'])
+        booking.requested_duration = duration
+        booking.requested_hours = hours
+        booking.save(update_fields=['change_requested', 'requested_date',
+                                    'requested_start_time', 'requested_duration',
+                                    'requested_hours'])
         _notify_owner_of_change_request(booking)
         return Response(BookingSerializer(booking).data)
+
+
+class OrderCreateView(APIView):
+    """POST /api/orders/ — place a paid checkout as one order (Whish flow).
+
+    Validates and creates the booking(s), holds the slot(s) as pending, and returns
+    the order (number + amount + Whish account) so the client can transfer and upload
+    a receipt. 'Pay at center' still books directly through the booking endpoint."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        items = request.data.get('bookings') or []
+        method = request.data.get('payment_method') or Order.Method.WHISH
+        if not isinstance(items, list) or not items:
+            return Response({'detail': 'No bookings to order.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        # Only Whish orders go through here — "pay at center" books directly and
+        # must never create a stuck order that no one ever settles.
+        if method != Order.Method.WHISH:
+            return Response({'detail': 'Only Whish orders are supported here.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate every line up front so one bad slot aborts the whole order.
+        sers = []
+        for it in items:
+            s = BookingCreateSerializer(data=it, context={'request': request})
+            if not s.is_valid():
+                return Response(s.errors, status=status.HTTP_400_BAD_REQUEST)
+            sers.append(s)
+
+        with transaction.atomic():
+            order = Order.objects.create(
+                user=request.user, payment_method=method, status=Order.Status.AWAITING)
+            total = 0
+            for s in sers:
+                # create() re-checks the slot under a row lock, so a second line
+                # colliding with the first (or a concurrent request) is rejected
+                # and rolls back the whole order.
+                booking = s.save()
+                booking.order = order
+                booking.is_pending = True  # hold the slot until payment is verified
+                booking.save(update_fields=['order', 'is_pending'])
+                total += booking.price or 0
+            order.amount = total
+            order.save(update_fields=['amount'])
+            if total <= 0:
+                # Nothing to pay (e.g. fully covered by free hours) — confirm now
+                # (sets is_paid and emails the customer).
+                confirm_order_paid(order)
+
+        return Response(OrderSerializer(order, context={'request': request}).data,
+                        status=status.HTTP_201_CREATED)
+
+
+def confirm_order_paid(order):
+    """Mark an order Paid and confirm its held bookings (emailing the customer).
+    Shared by the OCR auto-verify path and the admin Mark-paid action."""
+    order.status = Order.Status.PAID
+    order.paid_at = timezone.now()
+    order.save(update_fields=['status', 'paid_at'])
+    for b in order.bookings.exclude(status=Booking.Status.CANCELLED):
+        b.is_pending = False
+        b.is_paid = True
+        b.save(update_fields=['is_pending', 'is_paid'])
+        _send_booking_confirmation(b)
+
+
+class OrderDetailView(APIView):
+    """GET /api/orders/<order_number>/ — the customer's own order (payment page)."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, order_number):
+        order = Order.objects.filter(order_number=order_number, user=request.user).first()
+        if not order:
+            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(OrderSerializer(order, context={'request': request}).data)
+
+
+def _content_matches_ext(fileobj, ext):
+    """Sniff the file's magic bytes so a mislabeled/polyglot file (e.g. HTML named
+    .png) can't be stored and served from same-origin /media."""
+    fileobj.seek(0)
+    head = fileobj.read(12)
+    fileobj.seek(0)
+    checks = {
+        '.jpg': head[:3] == b'\xff\xd8\xff',
+        '.jpeg': head[:3] == b'\xff\xd8\xff',
+        '.png': head[:8] == b'\x89PNG\r\n\x1a\n',
+        '.gif': head[:6] in (b'GIF87a', b'GIF89a'),
+        '.webp': head[:4] == b'RIFF' and head[8:12] == b'WEBP',
+        '.pdf': head[:5] == b'%PDF-',
+    }
+    return checks.get(ext, False)
+
+
+class OrderReceiptView(APIView):
+    """POST /api/orders/<order_number>/receipt/ — upload the Whish transfer receipt."""
+
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+    ALLOWED = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.pdf'}
+    MAX = 8 * 1024 * 1024
+
+    def post(self, request, order_number):
+        order = Order.objects.filter(order_number=order_number, user=request.user).first()
+        if not order:
+            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if order.status == Order.Status.PAID:
+            return Response({'detail': 'This order is already paid.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        f = request.FILES.get('file')
+        if not f:
+            return Response({'detail': 'Attach your payment receipt.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        ext = os.path.splitext(f.name)[1].lower()
+        if ext not in self.ALLOWED:
+            return Response({'detail': 'Upload an image or PDF.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not _content_matches_ext(f, ext):
+            return Response({'detail': 'That file doesn\'t look like a valid image or PDF.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if f.size > self.MAX:
+            return Response({'detail': 'File too large (max 8MB).'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        path = default_storage.save(f'receipts/{uuid.uuid4().hex}{ext}', f)
+        order.receipt_url = default_storage.url(path)
+        order.status = Order.Status.SUBMITTED
+        order.save(update_fields=['receipt_url', 'status'])
+        return Response(OrderSerializer(order, context={'request': request}).data)
 
 
 class OverviewView(APIView):
@@ -388,7 +599,7 @@ class OverviewView(APIView):
 
     def get(self, request):
         user = request.user
-        today = date.today()
+        today = timezone.localdate()
 
         membership = Membership.objects.filter(user=user).select_related('plan').first()
         if membership:
@@ -453,7 +664,7 @@ class ScheduleChangeView(APIView):
 
         seen_dates = set()
         dated = []
-        today = date.today()
+        today = timezone.localdate()
         for c in proposed:
             if not isinstance(c, dict):
                 continue
@@ -825,6 +1036,65 @@ def _refund_free_hours(booking):
     membership.save(update_fields=['room_hours_used', 'hours_period'])
     booking.free_hours_used = 0
     booking.save(update_fields=['free_hours_used'])
+
+
+class NotEnoughHoursError(Exception):
+    """Raised when a reschedule needs more free meeting-room hours than the member has."""
+
+    def __init__(self, left, needed):
+        self.left, self.needed = left, needed
+        super().__init__(f'Not enough free meeting-room hours ({left:g} left, {needed} needed).')
+
+
+def apply_booking_change(booking, new_date, duration, start, end, hours):
+    """Move/resize a booking and re-settle its price + free meeting-room hours.
+
+    Refunds whatever free hours the booking currently holds, then re-deducts for
+    the new shape (hourly on a free-hours space), recomputing is_free/price. Raises
+    NotEnoughHoursError if the member's balance can't cover the new hourly length.
+    Runs atomically so a shortfall leaves the booking (and balance) untouched.
+    """
+    from .models import Booking, Membership
+
+    space = booking.space
+    with transaction.atomic():
+        _refund_free_hours(booking)  # return the old allocation to the member's balance
+
+        deducted = 0
+        if duration == Booking.Duration.HOURLY and space.uses_free_hours:
+            membership = (Membership.objects.select_for_update()
+                          .filter(user=booking.user).select_related('plan').first())
+            if membership:
+                membership.sync_period()
+                if membership.room_hours_left < hours:
+                    raise NotEnoughHoursError(membership.room_hours_left, hours)
+                membership.room_hours_used = float(membership.room_hours_used) + hours
+                membership.save(update_fields=['room_hours_used', 'hours_period'])
+                deducted = hours
+
+        booking.date = new_date
+        booking.duration = duration
+        booking.start_time = start
+        booking.end_time = end
+        booking.free_hours_used = deducted
+
+        if deducted or space.is_free:
+            booking.is_free = True
+            booking.price = None
+        elif duration == Booking.Duration.HOURLY:
+            rate = space.hour_price if space.hour_price is not None else space.day_price
+            booking.is_free = False
+            booking.price = (rate or 0) * hours
+        else:
+            booking.is_free = False
+            booking.price = space.day_price
+
+        booking.change_requested = False
+        booking.requested_date = None
+        booking.requested_start_time = None
+        booking.requested_duration = None
+        booking.requested_hours = None
+        booking.save()
 
 
 def _notify_owner_of_tour(tour):

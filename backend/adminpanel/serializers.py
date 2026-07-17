@@ -3,7 +3,7 @@ from rest_framework import serializers
 
 from bookings.models import (
     AdminSettings, BlockedSlot, Booking, CustomizationRequest, MembershipPlan,
-    PackageCategory, PromoCode, SiteContent, Space, TourRequest,
+    Order, PackageCategory, PromoCode, SiteContent, Space, TourRequest,
 )
 from bookings.serializers import MONTHS, validate_safe_url
 
@@ -109,9 +109,12 @@ class ReservationSerializer(serializers.ModelSerializer):
 
     client = serializers.SerializerMethodField()
     company = serializers.CharField(source='user.company', read_only=True)
+    email = serializers.EmailField(source='user.email', read_only=True)
     space_label = serializers.SerializerMethodField()
+    space_name = serializers.CharField(source='space.name', read_only=True)
     duration_label = serializers.SerializerMethodField()
     date_label = serializers.SerializerMethodField()
+    time_label = serializers.SerializerMethodField()
     status = serializers.CharField(source='reservation_status', read_only=True)
     status_label = serializers.SerializerMethodField()
     status_bg = serializers.SerializerMethodField()
@@ -120,13 +123,17 @@ class ReservationSerializer(serializers.ModelSerializer):
     change_requested = serializers.BooleanField(read_only=True)
     requested_label = serializers.SerializerMethodField()
     cancellable = serializers.SerializerMethodField()
+    price_display = serializers.SerializerMethodField()
+    order_number = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
         fields = (
-            'id', 'client', 'company', 'space_label', 'duration', 'duration_label',
-            'date', 'date_label', 'free', 'is_free', 'is_paid', 'status',
-            'status_label', 'status_bg', 'status_color', 'pending',
+            'id', 'client', 'company', 'email', 'space_label', 'space_name', 'unit',
+            'duration', 'duration_label', 'date', 'date_label', 'time_label',
+            'start_time', 'end_time', 'attendees', 'free', 'is_free', 'is_paid',
+            'price', 'price_display', 'free_hours_used', 'created_at', 'order_number',
+            'status', 'status_label', 'status_bg', 'status_color', 'pending',
             'change_requested', 'requested_label', 'cancellable',
         )
 
@@ -161,15 +168,36 @@ class ReservationSerializer(serializers.ModelSerializer):
         if not obj.change_requested or not obj.requested_date:
             return ''
         d = obj.requested_date
+        # The reschedule may also switch the booking's shape; show what was asked for.
+        req_duration = obj.requested_duration or obj.duration
         label = f'{MONTHS[d.month - 1]} {d.day:02d}'
-        if obj.duration == Booking.Duration.HOURLY and obj.requested_start_time:
+        if req_duration == Booking.Duration.HOURLY and obj.requested_start_time:
             label += f' · {obj.requested_start_time.strftime("%H:%M")}'
+            if obj.requested_hours:
+                label += f' · {obj.requested_hours} hr{"s" if obj.requested_hours > 1 else ""}'
         else:
             label += ' · Full day'
         return label
 
     def get_cancellable(self, obj):
         return not obj.is_cancelled and not obj.is_past
+
+    def get_time_label(self, obj):
+        """Just the clock window, e.g. '09:00–11:00' — 'Full day' when not hourly."""
+        if obj.duration != Booking.Duration.HOURLY or not obj.start_time:
+            return 'Full day'
+        label = obj.start_time.strftime('%H:%M')
+        if obj.end_time:
+            label += f'–{obj.end_time.strftime("%H:%M")}'
+        return label
+
+    def get_price_display(self, obj):
+        if obj.is_free:
+            return 'Free with plan'
+        return f'${obj.price:.2f}' if obj.price is not None else '—'
+
+    def get_order_number(self, obj):
+        return obj.order.order_number if obj.order else ''
 
 
 class ReservationEditSerializer(serializers.ModelSerializer):
@@ -180,17 +208,70 @@ class ReservationEditSerializer(serializers.ModelSerializer):
         fields = ('unit', 'date', 'duration', 'start_time', 'end_time', 'status', 'is_paid')
         extra_kwargs = {f: {'required': False} for f in fields}
 
+    def update(self, instance, validated_data):
+        """When an admin changes the schedule (date/duration/times), re-settle the
+        booking's free meeting-room hours and price — a raw field save would leave
+        the member's balance and the price stale."""
+        from datetime import datetime, date as _date, timedelta
+        from bookings.views import (
+            apply_booking_change, _booking_length_hours, NotEnoughHoursError,
+        )
+
+        # Non-scheduling fields save directly.
+        for f in ('unit', 'status', 'is_paid'):
+            if f in validated_data:
+                setattr(instance, f, validated_data[f])
+
+        sched = ('date', 'duration', 'start_time', 'end_time')
+        if not any(f in validated_data for f in sched):
+            instance.save()
+            return instance
+
+        new_date = validated_data.get('date', instance.date)
+        duration = validated_data.get('duration', instance.duration)
+        if duration == Booking.Duration.HOURLY:
+            start = validated_data.get('start_time', instance.start_time)
+            end = validated_data.get('end_time', instance.end_time)
+            if start and end:
+                delta = datetime.combine(_date.min, end) - datetime.combine(_date.min, start)
+                hours = max(1, round(delta.total_seconds() / 3600))
+            else:
+                hours = _booking_length_hours(instance)
+                start = start or instance.start_time
+                end = (datetime.combine(new_date, start) + timedelta(hours=hours)).time()
+        else:
+            start = end = None
+            hours = None
+
+        try:
+            apply_booking_change(instance, new_date, duration, start, end, hours)
+        except NotEnoughHoursError as exc:
+            raise serializers.ValidationError({'detail': str(exc)})
+        return instance
+
 
 class AdminSpaceSerializer(serializers.ModelSerializer):
     meta = serializers.CharField(read_only=True)
     availability_status = serializers.SerializerMethodField()
+
+    def update(self, instance, validated_data):
+        """Growing a space's unit count retroactively makes its existing
+        unit-less bookings ambiguous (they name no room, so a new booking can be
+        placed on the same physical one). Stamp them with a concrete unit as soon
+        as the space stops being single-unit."""
+        was_single = (instance.units or 1) <= 1
+        space = super().update(instance, validated_data)
+        if was_single and (space.units or 1) > 1:
+            space.assign_missing_units()
+        return space
 
     class Meta:
         model = Space
         fields = (
             'id', 'key', 'name', 'icon', 'icon_color', 'gradient', 'description',
             'capacity', 'size', 'amenities', 'equipment', 'images', 'video_url',
-            'is_free', 'uses_free_hours', 'durations', 'day_price', 'hour_price', 'units', 'rates',
+            'is_free', 'uses_free_hours', 'durations', 'day_price', 'hour_price', 'units',
+            'unit_names', 'rates',
             'is_active', 'booking_enabled', 'admin_status', 'availability_status',
             'order', 'meta',
         )
@@ -237,13 +318,67 @@ class SiteContentSerializer(serializers.ModelSerializer):
         model = SiteContent
         fields = ('hero_headline', 'hero_subheading', 'hero_media_type', 'hero_media_url',
                   'gallery', 'services', 'testimonials', 'intro_text', 'stats', 'solutions',
-                  'hero_cards', 'footer', 'headings', 'nav_menus', 'updated_at')
+                  'hero_cards', 'footer', 'headings', 'nav_menus',
+                  'about_eyebrow', 'about_title', 'about_body', 'about_points',
+                  'updated_at')
         read_only_fields = ('updated_at',)
 
     def validate_hero_media_url(self, value):
         # Rendered as media src on the public homepage — reject javascript:/data:
         # and other script-capable schemes.
         return validate_safe_url(value)
+
+
+class AdminOrderSerializer(serializers.ModelSerializer):
+    """Whish payment order for the admin Payments table."""
+
+    customer = serializers.SerializerMethodField()
+    email = serializers.EmailField(source='user.email', read_only=True)
+    company = serializers.CharField(source='user.company', read_only=True)
+    amount_display = serializers.SerializerMethodField()
+    status_label = serializers.SerializerMethodField()
+    method_label = serializers.CharField(source='get_payment_method_display', read_only=True)
+    bookings = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Order
+        fields = (
+            'id', 'order_number', 'customer', 'email', 'company', 'amount', 'amount_display',
+            'payment_method', 'method_label', 'status', 'status_label', 'receipt_url', 'note',
+            'created_at', 'paid_at', 'bookings',
+        )
+
+    def get_customer(self, obj):
+        return obj.user.full_name or obj.user.email
+
+    def get_amount_display(self, obj):
+        return f'${obj.amount:.2f}'
+
+    def get_status_label(self, obj):
+        return obj.get_status_display()
+
+    def get_bookings(self, obj):
+        rows = []
+        for b in obj.bookings.all():
+            if b.duration == Booking.Duration.HOURLY and b.start_time:
+                t = b.start_time.strftime('%H:%M')
+                if b.end_time:
+                    t += f'–{b.end_time.strftime("%H:%M")}'
+            else:
+                t = 'Full day'
+            label = b.space.name + (f' · {b.unit}' if b.unit else '')
+            rows.append({
+                'id': b.id,
+                'label': label,
+                'date': b.date.isoformat(),
+                'time': t,
+                'space': b.space.name,
+                'unit': b.unit,
+                'attendees': b.attendees,
+                'price': f'${b.price:.2f}' if b.price is not None else ('Free with plan' if b.is_free else '—'),
+                'status_label': b.status_label,
+            })
+        return rows
 
 
 class AdminSettingsSerializer(serializers.ModelSerializer):
@@ -253,7 +388,9 @@ class AdminSettingsSerializer(serializers.ModelSerializer):
             'allow_sameday', 'auto_approve', 'pay_at_center', 'sameday_cutoff',
             'center_name', 'opening_hours', 'business_hours', 'notification_email',
             'contact_email', 'phones', 'address', 'maps_url',
-            'whatsapp_number', 'whatsapp_message', 'updated_at',
+            'whatsapp_number', 'whatsapp_message',
+            'whish_enabled', 'whish_number', 'whish_qr_url', 'whish_account_name',
+            'updated_at',
         )
         read_only_fields = ('updated_at',)
 
