@@ -26,8 +26,8 @@ from bookings.serializers import (
 )
 from bookings.views import (
     NotEnoughHoursError, apply_booking_change, confirm_order_paid,
-    _booking_length_hours, _refund_free_hours, _send_change_result,
-    _send_schedule_change_result, _slot_end_time,
+    _booking_length_hours, _refund_free_hours, _send_booking_confirmation,
+    _send_change_result, _send_schedule_change_result, _slot_end_time,
 )
 
 from .serializers import (
@@ -406,9 +406,14 @@ class AdminReservationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         booking = self.get_object()
+        was_pending = booking.is_pending
         booking.is_pending = False
         booking.status = Booking.Status.CONFIRMED
         booking.save(update_fields=['is_pending', 'status'])
+        # The member was told "awaiting confirmation" when they booked, so close
+        # the loop — otherwise approving is silent and they never learn it's live.
+        if was_pending:
+            _send_booking_confirmation(booking)
         return Response(ReservationSerializer(booking).data)
 
     @action(detail=True, methods=['post'])

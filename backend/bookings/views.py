@@ -765,18 +765,27 @@ def _send_booking_confirmation(booking):
         if booking.end_time:
             when += f' – {booking.end_time.strftime("%H:%M")}'
     unit = f' · {booking.unit}' if booking.unit else ''
+    # A booking awaiting the admin's approval isn't confirmed — saying so would
+    # promise the member a slot that might still be rejected.
+    pending = booking.is_pending
+    lead = ('We\'ve received your booking request — it\'s awaiting confirmation.'
+            if pending else 'Your booking is confirmed.')
+    closing = ('\nWe\'ll email you as soon as it\'s confirmed.\n' if pending
+               else '\nSee you at the center!\n')
     body = (
         f'Hi {user.full_name},\n\n'
-        f'Your booking is confirmed.\n\n'
+        f'{lead}\n\n'
         f'Space: {booking.space.name}{unit}\n'
         f'Date:  {booking.date:%A, %d %b %Y}\n'
         f'Time:  {when}\n'
         + (f'Attendees: {booking.attendees}\n' if booking.attendees else '')
-        + '\nSee you at the center!\n'
+        + closing
     )
     try:
         send_mail(
-            subject=f'Booking confirmed — {booking.space.name} on {booking.date:%d %b}',
+            subject=(f'Booking request received — {booking.space.name} on {booking.date:%d %b}'
+                     if pending else
+                     f'Booking confirmed — {booking.space.name} on {booking.date:%d %b}'),
             message=body,
             from_email=dj_settings.DEFAULT_FROM_EMAIL,
             recipient_list=[user.email],

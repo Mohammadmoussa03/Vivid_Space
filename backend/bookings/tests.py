@@ -158,6 +158,89 @@ class FulldayUnitTests(BookingTestBase):
             self.book(date=self.tomorrow.isoformat(), duration='fullday', unit='Borealis').status_code, 201)
 
 
+class AutoApproveTests(APITestCase):
+    """The admin's "Auto-approve bookings" switch must actually gate bookings."""
+
+    def setUp(self):
+        self.space = Space.objects.create(
+            key='room', name='Room', is_free=False, uses_free_hours=False,
+            durations=['hourly'], units=1, hour_price=40)
+        self.member = User.objects.create_user(
+            email='m@example.com', password='pw12345678', is_approved=True)
+        self.admin = User.objects.create_user(
+            email='a@example.com', password='pw12345678', is_approved=True,
+            role=User.Role.ADMIN)
+        self.admin_client = APIClient()
+        self.admin_client.force_authenticate(self.admin)
+        self.client.force_authenticate(self.member)
+        self.day = (timezone.localdate() + timedelta(days=1)).isoformat()
+
+    def _set_auto(self, on):
+        s = AdminSettings.load()
+        s.auto_approve = on
+        s.save()
+
+    def book(self, hour='10:00'):
+        return self.client.post('/api/bookings/', {
+            'space': 'room', 'date': self.day, 'duration': 'hourly',
+            'start_time': hour, 'hours': 1}, format='json')
+
+    def test_switch_on_books_immediately(self):
+        self._set_auto(True)
+        b = Booking.objects.get(pk=self.book().data['id'])
+        self.assertFalse(b.is_pending)
+
+    def test_switch_off_holds_booking_for_approval(self):
+        self._set_auto(False)
+        b = Booking.objects.get(pk=self.book().data['id'])
+        self.assertTrue(b.is_pending)
+        self.assertEqual(b.reservation_status, 'pending')
+
+    def test_pending_booking_shows_in_the_admin_pending_filter(self):
+        self._set_auto(False)
+        self.book()
+        rows = self.admin_client.get('/api/admin/reservations/?filter=pending').data
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]['pending'])
+
+    def test_pending_booking_is_not_emailed_as_confirmed(self):
+        """Promising a slot that an admin might still reject would be a lie."""
+        self._set_auto(False)
+        mail.outbox = []
+        self.book()
+        body = mail.outbox[0].body
+        self.assertIn('awaiting confirmation', body)
+        self.assertNotIn('Your booking is confirmed', body)
+        self.assertIn('request received', mail.outbox[0].subject.lower())
+
+    def test_auto_approved_booking_is_emailed_as_confirmed(self):
+        self._set_auto(True)
+        mail.outbox = []
+        self.book()
+        self.assertIn('Your booking is confirmed', mail.outbox[0].body)
+        self.assertIn('confirmed', mail.outbox[0].subject.lower())
+
+    def test_admin_approval_confirms_and_emails_the_member(self):
+        self._set_auto(False)
+        b = Booking.objects.get(pk=self.book().data['id'])
+        mail.outbox = []
+        resp = self.admin_client.post(f'/api/admin/reservations/{b.id}/approve/')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        b.refresh_from_db()
+        self.assertFalse(b.is_pending)
+        # The member was told "awaiting confirmation" — they must hear the outcome.
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ['m@example.com'])
+        self.assertIn('Your booking is confirmed', mail.outbox[0].body)
+
+    def test_approving_an_already_live_booking_does_not_re_email(self):
+        self._set_auto(True)
+        b = Booking.objects.get(pk=self.book().data['id'])
+        mail.outbox = []
+        self.admin_client.post(f'/api/admin/reservations/{b.id}/approve/')
+        self.assertEqual(len(mail.outbox), 0)
+
+
 class UnitLabelTests(APITestCase):
     """Every unit of a space must be reachable, and no booking may stay ambiguous
     once the space has more than one unit."""
@@ -286,6 +369,11 @@ class BookingExperienceTests(BookingTestBase):
         self.assertIn('not available', str(resp.data))
 
     def test_booking_emails_client_and_owner(self):
+        # This covers the confirmed-booking email, so opt in explicitly rather
+        # than leaning on the auto-approve default.
+        s = AdminSettings.load()
+        s.auto_approve = True
+        s.save()
         mail.outbox = []
         resp = self.book(attendees=4)
         self.assertEqual(resp.status_code, 201, resp.data)

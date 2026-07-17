@@ -386,6 +386,12 @@ class BookingCreateSerializer(serializers.ModelSerializer):
                     validated_data['is_free'] = True
                     validated_data['price'] = None
             validated_data['free_hours_used'] = deducted
+            # The admin's "Auto-approve bookings" switch decides whether a new
+            # booking is live immediately or has to be vetted first. Off → the
+            # slot is held as pending and only an admin's Approve confirms it.
+            # (The Whish order flow overrides this to pending regardless, since
+            # its slot is held until the transfer is verified.)
+            validated_data['is_pending'] = not AdminSettings.load().auto_approve
             return super().create(validated_data)
 
     def to_representation(self, instance):
