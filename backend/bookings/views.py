@@ -857,7 +857,16 @@ def _notify_owner_of_booking(booking):
         if booking.end_time:
             when += f' – {booking.end_time.strftime("%H:%M")}'
     unit = f' · {booking.unit}' if booking.unit else ''
-    pay = 'Free with plan' if booking.is_free else 'Pay at center'
+    if booking.is_free:
+        pay = 'Free with plan'
+    elif booking.order_id:
+        # An attached order means it was paid online. Reporting "Pay at center" here
+        # would tell the owner to collect cash for money that's already in transit.
+        o = booking.order
+        pay = (f'{o.get_payment_method_display()} online — {o.order_number} '
+               f'({o.get_status_display()})')
+    else:
+        pay = 'Pay at center'
     body = (
         f'{user.full_name} booked {booking.space.name}{unit}.\n\n'
         f'Client: {user.full_name} ({user.email})\n'

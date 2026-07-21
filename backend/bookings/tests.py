@@ -538,6 +538,11 @@ class BookingExperienceTests(BookingTestBase):
         owner_mails = [m for m in mail.outbox if m.to != ['m@example.com']]
         self.assertEqual(len(owner_mails), 1)
         self.assertIn('New booking', owner_mails[0].subject)
+        # An online order must not be reported as cash owed at the center.
+        body = owner_mails[0].body
+        self.assertIn('Whish online', body)
+        self.assertIn('ORD-', body)
+        self.assertNotIn('Pay at center', body)
 
 
 class ChangeRequestTests(BookingTestBase):
