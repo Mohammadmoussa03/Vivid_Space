@@ -991,10 +991,17 @@ function PackageModal({ pkg, onClose, onContact }) {
   const benefits = (pkg.details?.common_benefits?.length ? pkg.details.common_benefits : pkg.features) || [];
 
   const card = {
-    position: 'relative', width: 'min(760px, 100%)', maxHeight: '88vh', overflowY: 'auto',
+    position: 'relative', width: 'min(920px, 100%)', maxHeight: '88vh', overflowY: 'auto',
     background: 'linear-gradient(180deg,#FFFFFF 0%,#FCFAF6 100%)', border: `1px solid ${MS.line}`,
     borderRadius: 22, padding: 'clamp(22px,4vw,38px)', boxShadow: '0 30px 60px -34px rgba(20,18,16,0.4)',
     animation: 'ms-modal 220ms ease-out both',
+  };
+
+  // Two large tiles per row on desktop. `min(300px, 100%)` keeps the track from
+  // outgrowing a narrow phone — a bare 300px minimum would overflow the modal.
+  const photoGrid = {
+    display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(300px, 100%), 1fr))',
+    gap: 14, marginBottom: 26,
   };
 
   return (
@@ -1008,17 +1015,17 @@ function PackageModal({ pkg, onClose, onContact }) {
 
         {/* Photo gallery */}
         {shots.length > 0 ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12, marginBottom: 26 }}>
+          <div style={photoGrid}>
             {shots.map((src, i) => (
-              <div key={i} style={{ aspectRatio: '4 / 3', borderRadius: 12, overflow: 'hidden', background: GALLERY_GRADS[i % GALLERY_GRADS.length] }}>
+              <div key={i} style={{ aspectRatio: '4 / 3', borderRadius: 14, overflow: 'hidden', background: GALLERY_GRADS[i % GALLERY_GRADS.length] }}>
                 <img src={src} alt={`${pkg.name} ${i + 1}`} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
               </div>
             ))}
           </div>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12, marginBottom: 26 }}>
+          <div style={photoGrid}>
             {[0, 1, 2].map((i) => (
-              <div key={i} style={{ aspectRatio: '4 / 3', borderRadius: 12, background: GALLERY_GRADS[i % GALLERY_GRADS.length], display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.9)', fontSize: 13, fontWeight: 600, textAlign: 'center', padding: 10 }}>Photos coming soon</div>
+              <div key={i} style={{ aspectRatio: '4 / 3', borderRadius: 14, background: GALLERY_GRADS[i % GALLERY_GRADS.length], display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.9)', fontSize: 13, fontWeight: 600, textAlign: 'center', padding: 10 }}>Photos coming soon</div>
             ))}
           </div>
         )}
