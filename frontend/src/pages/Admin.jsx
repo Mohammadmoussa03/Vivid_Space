@@ -442,8 +442,6 @@ const ALLOC_COLORS = ['#9B7EBD', '#4F8A76', '#C0844E', '#5E79A8', '#B0678E', '#6
 function CustomizeModal({ user, onClose }) {
   const [plans, setPlans] = useState([]);
   const [form, setForm] = useState(null); // null while loading
-  const [mode, setMode] = useState('existing'); // 'existing' | 'custom'
-  const [existingPlan, setExistingPlan] = useState('');
   const [alloc, setAlloc] = useState([]);     // ordered plan ids in the mix (drives colours)
   const [assign, setAssign] = useState({});   // iso day -> plan id
   const [lifetime, setLifetime] = useState({}); // plan id -> true when granted for lifetime
@@ -458,8 +456,6 @@ function CustomizeModal({ user, onClose }) {
         const list = Array.isArray(pk) ? pk : [];
         setPlans(list);
         const m = ms?.membership;
-        setMode(m?.custom_plan_name ? 'custom' : 'existing');
-        setExistingPlan(m?.plan ?? (list[0]?.id ?? ''));
         // Rebuild the allocation from stored components (dated or lifetime).
         const comps = (m?.custom_components || []).filter((c) => c && c.plan != null);
         const order = [];
@@ -530,22 +526,19 @@ function CustomizeModal({ user, onClose }) {
 
   const save = async () => {
     setErr('');
-    let planFk = existingPlan;
-    let components = [];
-    if (mode === 'custom') {
-      if (!String(form.custom_plan_name).trim()) { setErr('Give the custom package a name.'); return; }
-      // Include packages that are lifetime or have at least one assigned day.
-      const inUse = alloc.filter((pid) => isLifetime(pid) || countFor(pid) > 0);
-      if (inUse.length === 0) { setErr('Add a package, then pick its days or mark it lifetime.'); return; }
-      planFk = inUse[0];
-      components = inUse.map((pid) => (isLifetime(pid)
-        ? { plan: pid, name: planName(pid), lifetime: true, dates: [] }
-        : { plan: pid, name: planName(pid), dates: datesFor(pid) }));
-    } else if (!planFk) { setErr('Choose a base plan.'); return; }
+    if (!String(form.custom_plan_name).trim()) { setErr('Give the custom package a name.'); return; }
+    // Include packages that are lifetime or have at least one assigned day.
+    const inUse = alloc.filter((pid) => isLifetime(pid) || countFor(pid) > 0);
+    if (inUse.length === 0) { setErr('Add a package, then pick its days or mark it lifetime.'); return; }
+    // The membership still needs a plan FK; the first package in the mix is it.
+    const planFk = inUse[0];
+    const components = inUse.map((pid) => (isLifetime(pid)
+      ? { plan: pid, name: planName(pid), lifetime: true, dates: [] }
+      : { plan: pid, name: planName(pid), dates: datesFor(pid) }));
 
     const payload = {
       plan: planFk,
-      custom_plan_name: mode === 'custom' ? String(form.custom_plan_name).trim() : '',
+      custom_plan_name: String(form.custom_plan_name).trim(),
       status: form.status,
       monthly_hours: form.monthly_hours === '' ? null : Number(form.monthly_hours),
       custom_price: form.custom_price === '' ? null : Number(form.custom_price),
@@ -560,7 +553,8 @@ function CustomizeModal({ user, onClose }) {
   const label = (t) => <label style={{ fontSize: 13.5, fontWeight: 500, color: MS.ink }}>{t}</label>;
   const inp = { background: '#fff', border: `1px solid ${MS.line}`, borderRadius: 10, padding: '10px 12px', fontFamily: MS.sans, fontSize: 14.5, color: MS.ink, outline: 'none', width: '100%' };
   const navBtn = (on) => ({ width: 34, height: 34, borderRadius: 9999, border: `1px solid ${MS.line}`, background: '#fff', color: on ? MS.ink : '#C4BEB6', fontSize: 16, cursor: on ? 'pointer' : 'not-allowed' });
-  const basePlan = plans.find((p) => String(p.id) === String(existingPlan));
+  // Placeholder hints (plan default hours / price) come from the first package in the mix.
+  const basePlan = plans.find((p) => String(p.id) === String(alloc[0]));
   const unpicked = plans.filter((p) => !alloc.some((x) => String(x) === String(p.id)));
 
   return (
@@ -578,114 +572,95 @@ function CustomizeModal({ user, onClose }) {
           <p style={{ color: MS.faint, fontSize: 14, padding: '24px 0' }}>Loading…</p>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginTop: 18 }}>
-            <div style={{ display: 'flex', gap: 8, background: MS.line2, padding: 4, borderRadius: 12 }}>
-              {[['existing', 'Existing package'], ['custom', 'Custom package']].map(([v, l]) => (
-                <button key={v} type="button" onClick={() => setMode(v)}
-                  style={{ flex: 1, padding: '9px 10px', borderRadius: 9, border: 'none', cursor: 'pointer', fontFamily: MS.sans, fontSize: 13.5, fontWeight: 600, background: mode === v ? '#fff' : 'transparent', color: mode === v ? MS.ink : MS.faint, boxShadow: mode === v ? '0 1px 3px rgba(20,18,16,0.12)' : 'none' }}>{l}</button>
-              ))}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+              {label('Package name')}
+              <input value={form.custom_plan_name} onChange={(e) => set('custom_plan_name', e.target.value)} placeholder="e.g. Northwind Bespoke" style={inp} />
             </div>
 
-            {mode === 'existing' ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-                {label('Base plan')}
-                <select value={existingPlan} onChange={(e) => setExistingPlan(e.target.value)} style={inp}>
-                  {plans.length === 0 && <option value="">No packages exist yet</option>}
-                  {plans.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
+            {/* Multi-package day allocation */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+              {label('Packages in this month')}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {alloc.map((pid) => {
+                  const on = String(active) === String(pid);
+                  const col = colorOf(pid);
+                  return (
+                    <button key={pid} type="button" onClick={() => setActive(pid)}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 8, border: `1.5px solid ${on ? col : MS.line}`, background: on ? col : '#fff', color: on ? '#fff' : MS.ink, borderRadius: 9999, padding: '8px 12px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer' }}>
+                      <span style={{ width: 10, height: 10, borderRadius: 9999, background: on ? '#fff' : col, flex: '0 0 auto' }} />
+                      {planName(pid)}{isLifetime(pid) ? <span style={{ opacity: 0.9 }}>· ∞</span> : (countFor(pid) ? <span style={{ opacity: 0.9 }}>· {countFor(pid)}</span> : null)}
+                      <span onClick={(e) => { e.stopPropagation(); removePackage(pid); }} aria-label="Remove" style={{ marginLeft: 2, opacity: 0.75, cursor: 'pointer' }}>✕</span>
+                    </button>
+                  );
+                })}
+                {unpicked.length > 0 && (
+                  <select value="" onChange={(e) => addPackage(e.target.value)} style={{ ...inp, width: 'auto', padding: '8px 12px' }}>
+                    <option value="">+ Add package…</option>
+                    {unpicked.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                )}
               </div>
-            ) : (
-              <>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-                  {label('Package name')}
-                  <input value={form.custom_plan_name} onChange={(e) => set('custom_plan_name', e.target.value)} placeholder="e.g. Northwind Bespoke" style={inp} />
-                </div>
-
-                {/* Multi-package day allocation */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-                  {label('Packages in this month')}
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                    {alloc.map((pid) => {
-                      const on = String(active) === String(pid);
-                      const col = colorOf(pid);
+              {active && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 13, color: MS.muted }}>{planName(active)} duration:</span>
+                  <div style={{ display: 'inline-flex', gap: 4, background: MS.line2, padding: 3, borderRadius: 9 }}>
+                    {[['days', 'Specific days'], ['life', 'Lifetime']].map(([v, l]) => {
+                      const on = (v === 'life') === isLifetime(active);
                       return (
-                        <button key={pid} type="button" onClick={() => setActive(pid)}
-                          style={{ display: 'inline-flex', alignItems: 'center', gap: 8, border: `1.5px solid ${on ? col : MS.line}`, background: on ? col : '#fff', color: on ? '#fff' : MS.ink, borderRadius: 9999, padding: '8px 12px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer' }}>
-                          <span style={{ width: 10, height: 10, borderRadius: 9999, background: on ? '#fff' : col, flex: '0 0 auto' }} />
-                          {planName(pid)}{isLifetime(pid) ? <span style={{ opacity: 0.9 }}>· ∞</span> : (countFor(pid) ? <span style={{ opacity: 0.9 }}>· {countFor(pid)}</span> : null)}
-                          <span onClick={(e) => { e.stopPropagation(); removePackage(pid); }} aria-label="Remove" style={{ marginLeft: 2, opacity: 0.75, cursor: 'pointer' }}>✕</span>
-                        </button>
+                        <button key={v} type="button" onClick={() => setDurationMode(active, v === 'life')}
+                          style={{ padding: '5px 12px', borderRadius: 7, border: 'none', cursor: 'pointer', fontFamily: MS.sans, fontSize: 12.5, fontWeight: 600, background: on ? '#fff' : 'transparent', color: on ? MS.ink : MS.faint, boxShadow: on ? '0 1px 2px rgba(20,18,16,0.12)' : 'none' }}>{l}</button>
                       );
                     })}
-                    {unpicked.length > 0 && (
-                      <select value="" onChange={(e) => addPackage(e.target.value)} style={{ ...inp, width: 'auto', padding: '8px 12px' }}>
-                        <option value="">+ Add package…</option>
-                        {unpicked.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                      </select>
-                    )}
                   </div>
-                  {active && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: 13, color: MS.muted }}>{planName(active)} duration:</span>
-                      <div style={{ display: 'inline-flex', gap: 4, background: MS.line2, padding: 3, borderRadius: 9 }}>
-                        {[['days', 'Specific days'], ['life', 'Lifetime']].map(([v, l]) => {
-                          const on = (v === 'life') === isLifetime(active);
-                          return (
-                            <button key={v} type="button" onClick={() => setDurationMode(active, v === 'life')}
-                              style={{ padding: '5px 12px', borderRadius: 7, border: 'none', cursor: 'pointer', fontFamily: MS.sans, fontSize: 12.5, fontWeight: 600, background: on ? '#fff' : 'transparent', color: on ? MS.ink : MS.faint, boxShadow: on ? '0 1px 2px rgba(20,18,16,0.12)' : 'none' }}>{l}</button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
                 </div>
+              )}
+            </div>
 
-                {/* Calendar — taps colour a day for the active package */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-                    {label(active ? (isLifetime(active) ? `${planName(active)} is lifetime — covers every day` : `Tap days for ${planName(active)}`) : 'Pick a package above, then tap its days')}
-                    {(() => { const canDays = active && !isLifetime(active); return (
-                      <button type="button" onClick={toggleMonth} disabled={!canDays} style={{ flex: '0 0 auto', background: monthFull && canDays ? MS.accent : 'transparent', color: monthFull && canDays ? '#fff' : MS.accent, border: `1.5px solid ${MS.accent}`, borderRadius: 9999, padding: '6px 13px', fontSize: 12.5, fontWeight: 600, cursor: canDays ? 'pointer' : 'not-allowed', opacity: canDays ? 1 : 0.5 }}>{monthFull && canDays ? 'Clear month' : 'Whole month'}</button>
-                    ); })()}
-                  </div>
-                  <div style={{ background: '#fff', border: `1px solid ${MS.line}`, borderRadius: 14, padding: 14 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                      <button type="button" onClick={() => setMonthOffset((o) => Math.max(0, o - 1))} style={navBtn(monthOffset > 0)}>‹</button>
-                      <p style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 15.5, margin: 0 }}>{cal.label}</p>
-                      <button type="button" onClick={() => setMonthOffset((o) => o + 1)} style={navBtn(true)}>›</button>
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3, marginBottom: 4 }}>
-                      {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map((w) => <div key={w} style={{ textAlign: 'center', fontSize: 11, color: '#A9A39C', padding: '2px 0' }}>{w}</div>)}
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3 }}>
-                      {cal.cells.map((c, i) => {
-                        if (c.empty) return <div key={i} style={{ aspectRatio: '1' }} />;
-                        const pid = assign[c.iso];
-                        const on = pid != null;
-                        return (
-                          <div key={i} style={{ aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                            <button type="button" disabled={c.past || !active || isLifetime(active)} onClick={() => toggleDay(c.iso)} title={on ? planName(pid) : ''}
-                              style={{ width: '100%', height: '100%', border: String(pid) === String(active) ? '2px solid rgba(0,0,0,0.35)' : 'none', borderRadius: 9, background: on ? colorOf(pid) : 'transparent', color: on ? '#fff' : (c.past ? '#C4BEB6' : MS.ink), fontSize: 13, fontWeight: on ? 600 : 400, cursor: (c.past || !active || isLifetime(active)) ? 'not-allowed' : 'pointer' }}>{c.day}</button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                  {(totalDays > 0 || alloc.some((pid) => isLifetime(pid))) ? (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 2 }}>
-                      {alloc.filter((pid) => isLifetime(pid) || countFor(pid)).map((pid) => (
-                        <span key={pid} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 12.5, color: '#3A362F', background: MS.line2, padding: '6px 11px', borderRadius: 9999 }}>
-                          <span style={{ width: 9, height: 9, borderRadius: 9999, background: colorOf(pid), flex: '0 0 auto' }} />
-                          {isLifetime(pid) ? 'Lifetime' : `${countFor(pid)} day${countFor(pid) > 1 ? 's' : ''}`} · {planName(pid)}
-                        </span>
-                      ))}
-                      {totalDays > 0 && <span style={{ fontSize: 12.5, color: MS.faint, alignSelf: 'center' }}>· {totalDays} days total</span>}
-                    </div>
-                  ) : (
-                    <p style={{ fontSize: 12.5, color: '#A9A39C', margin: 0 }}>Add packages, then tap days (or “Whole month”) — or mark a package lifetime.</p>
-                  )}
+            {/* Calendar — taps colour a day for the active package */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                {label(active ? (isLifetime(active) ? `${planName(active)} is lifetime — covers every day` : `Tap days for ${planName(active)}`) : 'Pick a package above, then tap its days')}
+                {(() => { const canDays = active && !isLifetime(active); return (
+                  <button type="button" onClick={toggleMonth} disabled={!canDays} style={{ flex: '0 0 auto', background: monthFull && canDays ? MS.accent : 'transparent', color: monthFull && canDays ? '#fff' : MS.accent, border: `1.5px solid ${MS.accent}`, borderRadius: 9999, padding: '6px 13px', fontSize: 12.5, fontWeight: 600, cursor: canDays ? 'pointer' : 'not-allowed', opacity: canDays ? 1 : 0.5 }}>{monthFull && canDays ? 'Clear month' : 'Whole month'}</button>
+                ); })()}
+              </div>
+              <div style={{ background: '#fff', border: `1px solid ${MS.line}`, borderRadius: 14, padding: 14 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <button type="button" onClick={() => setMonthOffset((o) => Math.max(0, o - 1))} style={navBtn(monthOffset > 0)}>‹</button>
+                  <p style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 15.5, margin: 0 }}>{cal.label}</p>
+                  <button type="button" onClick={() => setMonthOffset((o) => o + 1)} style={navBtn(true)}>›</button>
                 </div>
-              </>
-            )}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3, marginBottom: 4 }}>
+                  {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map((w) => <div key={w} style={{ textAlign: 'center', fontSize: 11, color: '#A9A39C', padding: '2px 0' }}>{w}</div>)}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3 }}>
+                  {cal.cells.map((c, i) => {
+                    if (c.empty) return <div key={i} style={{ aspectRatio: '1' }} />;
+                    const pid = assign[c.iso];
+                    const on = pid != null;
+                    return (
+                      <div key={i} style={{ aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <button type="button" disabled={c.past || !active || isLifetime(active)} onClick={() => toggleDay(c.iso)} title={on ? planName(pid) : ''}
+                          style={{ width: '100%', height: '100%', border: String(pid) === String(active) ? '2px solid rgba(0,0,0,0.35)' : 'none', borderRadius: 9, background: on ? colorOf(pid) : 'transparent', color: on ? '#fff' : (c.past ? '#C4BEB6' : MS.ink), fontSize: 13, fontWeight: on ? 600 : 400, cursor: (c.past || !active || isLifetime(active)) ? 'not-allowed' : 'pointer' }}>{c.day}</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              {(totalDays > 0 || alloc.some((pid) => isLifetime(pid))) ? (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 2 }}>
+                  {alloc.filter((pid) => isLifetime(pid) || countFor(pid)).map((pid) => (
+                    <span key={pid} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 12.5, color: '#3A362F', background: MS.line2, padding: '6px 11px', borderRadius: 9999 }}>
+                      <span style={{ width: 9, height: 9, borderRadius: 9999, background: colorOf(pid), flex: '0 0 auto' }} />
+                      {isLifetime(pid) ? 'Lifetime' : `${countFor(pid)} day${countFor(pid) > 1 ? 's' : ''}`} · {planName(pid)}
+                    </span>
+                  ))}
+                  {totalDays > 0 && <span style={{ fontSize: 12.5, color: MS.faint, alignSelf: 'center' }}>· {totalDays} days total</span>}
+                </div>
+              ) : (
+                <p style={{ fontSize: 12.5, color: '#A9A39C', margin: 0 }}>Add packages, then tap days (or “Whole month”) — or mark a package lifetime.</p>
+              )}
+            </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
               {label('Status')}
