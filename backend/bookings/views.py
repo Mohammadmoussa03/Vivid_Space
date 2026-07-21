@@ -516,6 +516,14 @@ class OrderCreateView(APIView):
                 # (sets is_paid and emails the customer).
                 confirm_order_paid(order)
 
+        # Tell the owner as soon as the order is placed. A Whish order already holds
+        # a real slot, so waiting for the receipt (or for Mark-paid) would leave the
+        # admin blind to a booked space. Outside the atomic block so a rolled-back
+        # order can't email about bookings that don't exist, and once per booking so
+        # the later confirm/release stages don't send a duplicate.
+        for b in order.bookings.all():
+            _notify_owner_of_booking(b)
+
         return Response(OrderSerializer(order, context={'request': request}).data,
                         status=status.HTTP_201_CREATED)
 

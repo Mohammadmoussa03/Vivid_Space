@@ -524,6 +524,21 @@ class BookingExperienceTests(BookingTestBase):
         self.assertIn('confirmed', client_mail.subject.lower())
         self.assertIn('New booking', owner_mail.subject)
 
+    def test_whish_order_also_notifies_the_owner(self):
+        """The online-payment path bypasses BookingViewSet, so it has to send the
+        owner notification itself — otherwise Whish bookings arrive silently."""
+        mail.outbox = []
+        paid = Space.objects.create(
+            key='studio', name='Studio', is_free=False, uses_free_hours=False,
+            durations=['hourly'], units=1, hour_price=40)
+        resp = self.client.post('/api/orders/', {'payment_method': 'whish', 'bookings': [
+            {'space': paid.key, 'date': self.tomorrow.isoformat(), 'duration': 'hourly',
+             'start_time': '15:00', 'hours': 1}]}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        owner_mails = [m for m in mail.outbox if m.to != ['m@example.com']]
+        self.assertEqual(len(owner_mails), 1)
+        self.assertIn('New booking', owner_mails[0].subject)
+
 
 class ChangeRequestTests(BookingTestBase):
     """Member reschedule request → admin approve / reject flow."""

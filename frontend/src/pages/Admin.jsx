@@ -1344,7 +1344,7 @@ function Content() {
     hours: { title: 'Business hours', save: saveSettings, initial: settings, fields: [
       { name: 'center_name', label: 'Center name', type: 'text' },
       { name: 'opening_hours', label: 'Opening hours (display text)', type: 'text' },
-      { name: 'notification_email', label: 'Tour notification email', type: 'text' },
+      { name: 'notification_email', label: 'Admin notification email (tours, bookings, change requests)', type: 'text' },
     ] },
     rules: { title: 'Booking rules', save: saveSettings, initial: settings, fields: [
       { name: 'allow_sameday', label: 'Allow same-day bookings', type: 'checkbox' },
