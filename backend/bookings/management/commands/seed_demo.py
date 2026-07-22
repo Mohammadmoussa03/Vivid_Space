@@ -322,6 +322,10 @@ class Command(BaseCommand):
             pend.save()
         self.stdout.write(self.style.SUCCESS('Pending signups: casey@northwind.io, tom@beckerco.com'))
 
+        # Demo accounts skip the email-confirmation gate — nothing is actually
+        # mailed when seeding, and unverified accounts can't log in.
+        User.objects.update(email_verified=True)
+
         # Reservations across clients (mix of pending / confirmed / paid).
         Booking.objects.filter(user__in=clients.values()).delete()
         client_res = [

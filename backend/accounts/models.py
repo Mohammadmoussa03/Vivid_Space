@@ -29,6 +29,7 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
         extra_fields.setdefault('is_approved', True)
+        extra_fields.setdefault('email_verified', True)
         if extra_fields.get('is_staff') is not True:
             raise ValueError('Superuser must have is_staff=True.')
         if extra_fields.get('is_superuser') is not True:
@@ -56,6 +57,10 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     # New signups stay pending until an admin approves them.
     is_approved = models.BooleanField(default=False)
+
+    # Proof the address is real: set when the member clicks the link emailed at
+    # signup. Login is refused until it's True (admins are exempt).
+    email_verified = models.BooleanField(default=False)
 
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)

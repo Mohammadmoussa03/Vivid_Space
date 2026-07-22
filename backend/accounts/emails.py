@@ -9,13 +9,7 @@ from django.core.mail import send_mail
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 
-
-def owner_recipient():
-    """Where owner/admin notifications go: Admin → Settings, else OWNER_EMAIL."""
-    # Imported lazily to avoid an import cycle at app-load time.
-    from bookings.models import AdminSettings
-    return (AdminSettings.load().notification_email
-            or getattr(settings, 'OWNER_EMAIL', '') or settings.DEFAULT_FROM_EMAIL)
+from .tokens import email_verification_token
 
 
 def _send(subject, body, recipient):
@@ -29,32 +23,27 @@ def _send(subject, body, recipient):
         pass
 
 
-def send_signup_received(user):
-    """Confirm to a new member that their signup is in and pending approval."""
+def build_verify_url(user):
+    """A one-time email-confirmation link pointing at the frontend."""
+    uid = urlsafe_base64_encode(force_bytes(user.pk))
+    token = email_verification_token.make_token(user)
+    return f'{settings.FRONTEND_URL}/?verify_uid={uid}&verify_token={token}'
+
+
+def send_email_verification(user):
+    """Email a new member the link that unlocks their account."""
     if not user.email:
         return
     body = (
         f'Hi {user.full_name or "there"},\n\n'
-        f'Thanks for signing up to Vivid Space. Your account has been created and '
-        f'is now waiting for a quick review by our team.\n\n'
-        f'We\'ll email you as soon as it\'s approved — then you can log in and start '
-        f'booking spaces.\n\n'
+        f'Thanks for signing up to Vivid Space. Confirm this email address to '
+        f'activate your account:\n\n'
+        f'{build_verify_url(user)}\n\n'
+        f'Once confirmed you can log in and start booking spaces. If you didn\'t '
+        f'sign up, you can safely ignore this email.\n\n'
         f'— The Vivid Space team\n'
     )
-    _send('Welcome to Vivid Space — your account is pending approval', body, user.email)
-
-
-def notify_owner_new_signup(user):
-    """Tell the owner/admin a new member is waiting for approval."""
-    body = (
-        f'A new member signed up and is awaiting approval.\n\n'
-        f'Name:    {user.full_name or "—"}\n'
-        f'Email:   {user.email}\n'
-        f'Company: {user.company or "—"}\n\n'
-        f'Approve or reject them in the admin panel → Users.\n'
-    )
-    _send(f'New signup pending approval — {user.full_name or user.email}',
-          body, owner_recipient())
+    _send('Confirm your email — Vivid Space', body, user.email)
 
 
 def send_email_already_registered(email):

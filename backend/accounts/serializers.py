@@ -15,9 +15,10 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'id', 'uuid', 'email', 'first_name', 'last_name', 'company',
-            'role', 'is_approved', 'full_name', 'date_joined',
+            'role', 'is_approved', 'email_verified', 'full_name', 'date_joined',
         )
-        read_only_fields = ('id', 'uuid', 'role', 'is_approved', 'full_name', 'date_joined')
+        read_only_fields = ('id', 'uuid', 'role', 'is_approved', 'email_verified',
+                            'full_name', 'date_joined')
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -42,10 +43,12 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         password = validated_data.pop('password')
-        # New accounts are auto-approved and can log in immediately (no admin gate).
+        # No admin gate on new accounts — the only thing standing between a
+        # signup and logging in is confirming the email address.
         user = User.objects.create_user(
             password=password,
             is_approved=True,
+            email_verified=False,
             role=User.Role.MEMBER,
             **validated_data,
         )
@@ -53,8 +56,8 @@ class RegisterSerializer(serializers.ModelSerializer):
 
 
 class LoginSerializer(TokenObtainPairSerializer):
-    """Email/password login that also enforces the approval gate and
-    returns the serialized user alongside the JWT pair."""
+    """Email/password login that also enforces the approval and email-verification
+    gates and returns the serialized user alongside the JWT pair."""
 
     username_field = User.USERNAME_FIELD
 
@@ -63,6 +66,14 @@ class LoginSerializer(TokenObtainPairSerializer):
         if not self.user.is_approved and not self.user.is_admin:
             raise serializers.ValidationError(
                 {'detail': 'Your account is pending approval. We\'ll email you once it\'s active.'}
+            )
+        # Only reachable with the correct password, so naming the state here is
+        # not an enumeration oracle.
+        if not self.user.email_verified and not self.user.is_admin:
+            raise serializers.ValidationError(
+                {'detail': 'Please confirm your email address first — check your '
+                           'inbox for the link we sent when you signed up.',
+                 'code': 'email_unverified'}
             )
         data['user'] = UserSerializer(self.user).data
         return data
@@ -85,4 +96,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
 
 
 class PasswordResetSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
+class ResendVerificationSerializer(serializers.Serializer):
     email = serializers.EmailField()

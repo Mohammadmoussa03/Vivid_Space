@@ -25,6 +25,7 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_CLASSES': (),
     'DEFAULT_THROTTLE_RATES': {
         k: '100000/min' for k in
-        ('anon', 'user', 'login', 'login_account', 'register', 'password_reset')
+        ('anon', 'user', 'login', 'login_account', 'register', 'password_reset',
+         'verify_email')
     },
 }

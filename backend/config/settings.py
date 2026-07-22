@@ -205,6 +205,7 @@ REST_FRAMEWORK = {
         'login_account': env('THROTTLE_LOGIN_ACCOUNT', '20/hour'),  # per account (lockout)
         'register': env('THROTTLE_REGISTER', '5/min'),
         'password_reset': env('THROTTLE_PASSWORD_RESET', '5/min'),
+        'verify_email': env('THROTTLE_VERIFY_EMAIL', '10/min'),
         # Public, unauthenticated write endpoints that each send the owner an email.
         'tour': env('THROTTLE_TOUR', '5/min'),
         'customize': env('THROTTLE_CUSTOMIZE', '5/min'),

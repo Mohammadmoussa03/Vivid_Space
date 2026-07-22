@@ -44,13 +44,14 @@ frontend/   React 19 + Vite 8, react-router 7, axios. Inline-styled, token-drive
 ## Backend architecture
 - Apps: **`accounts`** (custom `User`, JWT auth, approval flow), **`bookings`** (core domain: plans, memberships, spaces, bookings, gallery, faqs, promo codes, tours, blocked slots, site content/settings), **`adminpanel`** (admin-only management endpoints), **`config`** (settings/urls).
 - URLs: `/api/auth/` (accounts), `/api/admin/` (adminpanel, admin-only), `/api/` (bookings public + member). Django admin at `/django-admin/`.
-- `AUTH_USER_MODEL = accounts.User`. Roles: `member` | `admin` (`user.is_staff_admin`/`role`); new members require `is_approved` (admin approves before login works — "pending" flow).
+- `AUTH_USER_MODEL = accounts.User`. Roles: `member` | `admin` (`user.is_staff_admin`/`role`). Signups are auto-`is_approved` (the admin "pending" flow still exists in the model/admin but nothing sets it False anymore); what actually gates login is `email_verified` — see below.
 - DB: PostgreSQL. Media uploads served from `/media` in DEBUG.
 
 ### Security model (auth, CSRF, hardening) — read before touching auth
 - **httpOnly-cookie JWT.** Access + refresh tokens ride in httpOnly/SameSite=Lax cookies (`vs_access`/`vs_refresh`), never in JSON bodies or JS-readable storage. `accounts/authentication.py` `CookieJWTAuthentication` is the **sole** `DEFAULT_AUTHENTICATION_CLASSES` — it reads the access cookie and **enforces CSRF** (double-submit `X-CSRFToken` vs `csrftoken` cookie) on unsafe methods. `accounts/cookies.py` sets/clears cookies consistently (login/refresh/logout must go through it).
 - **Refresh rotation + blacklist.** `ROTATE_REFRESH_TOKENS` + `BLACKLIST_AFTER_ROTATION` + the `token_blacklist` app (needs `migrate`). Login sets cookies & returns only `{user, csrftoken}`; `CookieTokenRefreshView` rotates from the cookie (empty body); logout blacklists the refresh token. Access TTL is 15 min.
 - **Revoke on password change.** Any password reset calls `accounts/tokens.blacklist_user_tokens(user)` so pre-reset tokens die. Do the same for any new credential-changing endpoint.
+- **Email verification (hard gate).** Registration creates the account with `email_verified=False` and mails a link (`/?verify_uid=…&verify_token=…`); `LoginSerializer` refuses the login until it's True (**admins exempt**, so a mail outage can't lock you out of the admin panel). `POST /auth/verify-email/` redeems it, `POST /auth/resend-verification/` re-sends. The token comes from `accounts/tokens.EmailVerificationTokenGenerator` — a **different `key_salt`** from Django's password-reset generator so the two link types aren't interchangeable, with `email_verified` in the hash to make links single-use. Migration `0003` grandfathers pre-existing users to True; `seed_demo` sets it on every demo account (unverified accounts can't log in and nothing is mailed when seeding). **Changing your email via `PATCH /auth/me/` does *not* re-trigger verification** — a known gap.
 - **Anti-enumeration.** `POST /auth/register/` returns an identical generic response for new vs. existing emails (real owner gets an out-of-band email); the email field is declared explicitly to drop DRF's `UniqueValidator` 400. Don't reintroduce "email already exists" leaks on public endpoints.
 - **Rate limiting / lockout.** DRF throttling (needs a shared cache — set `REDIS_URL` in prod; LocMem is per-process). Login has per-IP **and** per-account throttles (`accounts/throttling.py`); register/password-reset are scoped too.
 - **Admin/URL safety.** Admin-set URL fields (`maps_url`, `hero_media_url`) are validated http(s)/relative-only via `bookings.serializers.validate_safe_url` (+ frontend `safeUrl`). Admin serializers are read-only where they should be; `AdminUserViewSet` create is intentionally `405` (users self-register).
@@ -91,10 +92,12 @@ nginx, cron).
   generated DB password + `SECRET_KEY` in plaintext → **not** committed; move to an encrypted
   S3 backend before this is a shared/real env.
 - **Email.** Test mode = `console.EmailBackend` (emails printed to `journalctl -u vivid`, not
-  sent). Prod = `smtp.EmailBackend` → SES (`email-smtp.<region>.amazonaws.com:587`), creds
-  from `ses_smtp_username/password` tfvars. Django auto-switches to SMTP once `EMAIL_HOST_USER`
-  is set; an explicit `EMAIL_BACKEND` always wins (`settings.py`). SES starts **sandboxed** —
-  request production access separately.
+  sent). Prod = `smtp.EmailBackend` → **Resend** (`smtp.resend.com:587`, TLS). Django is
+  provider-agnostic: it auto-switches to SMTP once `EMAIL_HOST_USER` is set, and an explicit
+  `EMAIL_BACKEND` always wins (`settings.py:318-331`) — so swapping providers is an `.env` +
+  DNS change, no code change. ⚠️ **The Terraform bootstrap still bakes SES**
+  (`ec2.tf:77`, `user_data.sh.tftpl:59-64`) — Resend is hand-wired drift on the live box, so a
+  replaced instance comes back on SES until `.env` is re-wired from SSM.
 - **Console access without SSH:** the instance role has `AmazonSSMManagedInstanceCore`, so
   **EC2 → Connect → Session Manager** works with no key and no inbound 22 (SSM agent is
   preinstalled on the Ubuntu AMI). Prefer this over EC2 Instance Connect (which would need the
@@ -103,15 +106,43 @@ nginx, cron).
   replaces the instance on the next `tofu apply` (RDS/S3/EIP untouched, EIP address preserved).
   Pushing only app-code changes needs `tofu apply -replace=aws_instance.web` to re-run the
   clone/build.
-- **Live test box (throwaway):** `eu-central-1`, `http://35.157.5.65`, bucket
-  `vivid-space-test-f6225b03`, temp superuser `admin@vivid.test` (pw in `terraform/.admin_pw.tmp`,
-  gitignored). Tear down with `tofu destroy` after flipping `deletion_protection = false` on RDS.
-- **What's left for prod** (mostly tfvars flips, since the hardened path is already coded):
-  own a domain → set `domain_name`/`manage_dns`/`manage_ses`; SES production access + a real
-  superuser (delete the temp one); move state to encrypted S3; add CloudWatch alarms; consider
-  IMDSv2 enforcement, a real `vivid-media-prod` bucket, and ElastiCache/Multi-AZ when scaling.
+- **Live box (PROD):** `eu-central-1`, instance `i-0e1d6091e632a943e`, EIP `35.157.5.65`,
+  serving `https://vividspace.space` (+ `www`) with Let's Encrypt TLS. Media bucket
+  `vivid-space-test-f6225b03`. Superuser `mhmadmoussa05@gmail.com` (pw in SSM
+  `/vivid/admin/password`). Tear down with `tofu destroy` after flipping
+  `deletion_protection = false` on RDS.
+- **Remote state:** migrated to an encrypted, versioned S3 backend
+  (`vivid-space-tfstate-c6d8f380`, key `vivid-space/terraform.tfstate`, native `use_lockfile`
+  locking — see `versions.tf`). No local `*.tfstate` — the S3 object is authoritative.
+- **Email (Resend — current):** domain `vividspace.space`, Resend region `eu-west-1`, added
+  out-of-band via the Resend dashboard. DNS is in `resend.tf` (DKIM TXT `resend._domainkey`,
+  SPF TXT + return-path MX on `send.<domain>` → `feedback-smtp.eu-west-1.amazonaws.com`;
+  Resend runs on SES under the hood, hence the `amazonses.com` values). Live `.env`:
+  `EMAIL_HOST=smtp.resend.com`, `EMAIL_PORT=587`, `EMAIL_USE_TLS=True`,
+  `EMAIL_HOST_USER=resend`, `EMAIL_HOST_PASSWORD=<Resend API key>` (SSM
+  `/vivid/resend/api_key`), `DEFAULT_FROM_EMAIL=Vivid Space <no-reply@vividspace.space>`.
+  Hand-wired, NOT in tfvars/state — re-wire from SSM if the instance is replaced.
+- **Email (SES — legacy):** superseded by Resend. `ses.tf`, the `/vivid/ses/*` SSM creds, and
+  the `vivid-ses-feedback` SNS topic are still present but no longer the mail path; SES
+  production access was never approved. Don't wire new mail through it.
+- **`OWNER_EMAIL` is not set in the live `.env`**, so it falls back to `settings.py`'s default
+  `owner@vividspace.co` — the wrong domain. Harmless only because the real recipient comes from
+  `AdminSettings.notification_email` (currently `mhmadmoussa05@gmail.com`), which wins; clearing
+  that field in the admin panel would silently send all owner mail to a dead address.
+- **What's left for prod:** add CloudWatch alarms; consider IMDSv2 enforcement, a dedicated
+  `vivid-media-prod` bucket, and ElastiCache/Multi-AZ when scaling.
 
 ## Gotchas learned here
+- **A space can be booked through two different endpoints — side-effects must be added to both.**
+  `POST /bookings/` (pay-at-center) goes through `BookingViewSet.perform_create`; `POST /orders/`
+  (the Whish online-payment flow) builds bookings straight from `BookingCreateSerializer` in
+  `OrderCreateView` and never touches `perform_create`. An owner-notification bug hid here for a
+  while because the live `pay_at_center` switch is **off**, which forces every priced booking down
+  the order path. When adding email/audit/webhook side-effects to bookings, wire `OrderCreateView`
+  too — and remember `confirm_order_paid` / `release_order_hold` only email the *customer*.
+- **`AdminSettings.notification_email` is the recipient for every owner notification** (tours,
+  bookings, change requests, schedule changes, customization) — not just tours, despite the field's
+  old label. It's edited in Admin → Settings → Business hours.
 - **Deploy: `collectstatic` needs `STATIC_ROOT`.** `settings.py` sets `STATIC_ROOT`
   (`BASE_DIR/staticfiles`, env-overridable via `DJANGO_STATIC_ROOT`); without it `manage.py
   collectstatic` (guide step 6 / bootstrap) raises `ImproperlyConfigured`. nginx serves it via

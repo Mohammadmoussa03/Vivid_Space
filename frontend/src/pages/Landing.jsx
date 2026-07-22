@@ -136,6 +136,7 @@ export default function Landing() {
 
   const [authOpen, setAuthOpen] = useState(false);
   const [resetInfo, setResetInfo] = useState(null);   // { uid, token } from an emailed reset link
+  const [verifyInfo, setVerifyInfo] = useState(null); // { uid, token } from an emailed confirm link
   const [bookingSpace, setBookingSpace] = useState(null);
   const [dashOpen, setDashOpen] = useState(false);
   const [pkgDetail, setPkgDetail] = useState(null);   // package whose gallery/benefits modal is open
@@ -209,14 +210,16 @@ export default function Landing() {
     return () => { window.removeEventListener('focus', onFocus); document.removeEventListener('visibilitychange', onVisible); };
   }, [refreshSpaces]);
 
-  /* ---- password-reset link: open the "set new password" modal, then strip the token from the URL ---- */
+  /* ---- emailed reset / confirm links: open the auth modal, then strip the token from the URL ---- */
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
-    const uid = p.get('reset_uid'), token = p.get('reset_token');
-    if (!uid || !token) return;
-    setResetInfo({ uid, token });
+    const reset = { uid: p.get('reset_uid'), token: p.get('reset_token') };
+    const verify = { uid: p.get('verify_uid'), token: p.get('verify_token') };
+    if (!reset.uid && !verify.uid) return;
+    if (reset.uid && reset.token) setResetInfo(reset);
+    else if (verify.uid && verify.token) setVerifyInfo(verify);
     setAuthOpen(true);
-    p.delete('reset_uid'); p.delete('reset_token');
+    ['reset_uid', 'reset_token', 'verify_uid', 'verify_token'].forEach((k) => p.delete(k));
     const qs = p.toString();
     window.history.replaceState({}, '', window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash);
   }, []);
@@ -740,7 +743,7 @@ export default function Landing() {
       {customizeOpen && <CustomizeModal offices={officeOptions} onClose={() => setCustomizeOpen(false)} />}
       {bookingSpace && <BookingModal space={bookingSpace} whishEnabled={!!site?.payments?.whish_enabled}
         payAtCenter={site?.payments?.pay_at_center !== false} onClose={() => { setBookingSpace(null); refreshSpaces(); }} />}
-      {authOpen && <AuthModal onClose={() => { setAuthOpen(false); setResetInfo(null); }} onAuthed={onAuthed} goDashboard={goDashboard} resetInfo={resetInfo} />}
+      {authOpen && <AuthModal onClose={() => { setAuthOpen(false); setResetInfo(null); setVerifyInfo(null); }} onAuthed={onAuthed} goDashboard={goDashboard} resetInfo={resetInfo} verifyInfo={verifyInfo} />}
       {dashOpen && <DashboardModal user={user} onClose={() => setDashOpen(false)} />}
 
       {/* Floating WhatsApp click-to-chat (hidden while the dashboard is open). */}
@@ -1307,9 +1310,10 @@ function CustomizeModal({ offices, onClose }) {
 }
 
 /* ---------------- Auth modal (login / register / forgot) ---------------- */
-function AuthModal({ onClose, onAuthed, goDashboard, resetInfo }) {
-  const { login, register, requestReset, confirmReset, logout, user, isAuthed } = useAuth();
-  const [view, setView] = useState(resetInfo ? 'reset' : (isAuthed ? 'profile' : 'login'));
+function AuthModal({ onClose, onAuthed, goDashboard, resetInfo, verifyInfo }) {
+  const { login, register, requestReset, confirmReset, verifyEmail, resendVerification, logout, user, isAuthed } = useAuth();
+  const [view, setView] = useState(
+    resetInfo ? 'reset' : verifyInfo ? 'verifying' : (isAuthed ? 'profile' : 'login'));
   const [email, setEmail] = useState('');
   const [pass, setPass] = useState('');
   const [pass2, setPass2] = useState('');
@@ -1325,6 +1329,20 @@ function AuthModal({ onClose, onAuthed, goDashboard, resetInfo }) {
     </div>
   );
 
+  // Landing on a confirmation link: redeem it once, then report the outcome.
+  useEffect(() => {
+    if (!verifyInfo) return;
+    let alive = true;
+    verifyEmail(verifyInfo.uid, verifyInfo.token)
+      .then(() => { if (alive) setView('verify_done'); })
+      .catch((ex) => {
+        if (!alive) return;
+        setErr(apiError(ex, 'This confirmation link is invalid or has expired.'));
+        setView('login');
+      });
+    return () => { alive = false; };
+  }, [verifyInfo, verifyEmail]);
+
   const doLogin = async (e) => {
     e.preventDefault();
     if (!email.trim() || !pass.trim()) { setErr('Please enter your email and password.'); return; }
@@ -1332,7 +1350,9 @@ function AuthModal({ onClose, onAuthed, goDashboard, resetInfo }) {
     try { const u = await login(email, pass); onAuthed(u); }
     catch (ex) {
       const msg = apiError(ex, 'Invalid email or password.');
-      if (/pending/i.test(msg)) setView('pending'); else setErr(msg);
+      if (/confirm your email/i.test(msg)) setView('verify_sent');
+      else if (/pending/i.test(msg)) setView('pending');
+      else setErr(msg);
     } finally { setBusy(false); }
   };
   const doRegister = async (e) => {
@@ -1342,14 +1362,17 @@ function AuthModal({ onClose, onAuthed, goDashboard, resetInfo }) {
     setBusy(true);
     try {
       await register({ first_name: first, last_name: rest.join(' ') || first, email, password: pass });
-      // Accounts are auto-approved — sign the new member in immediately.
-      const u = await login(email, pass);
-      onAuthed(u);
+      // No auto sign-in: the account stays locked until the emailed link is clicked.
+      setView('verify_sent');
     } catch (ex) {
-      // Registration responds generically (anti-enumeration); if auto sign-in
-      // didn't go through, send them to the login screen.
-      setView('login'); setErr(apiError(ex, 'Please sign in with your new account.'));
+      setErr(apiError(ex, 'Something went wrong creating your account. Please try again.'));
     } finally { setBusy(false); }
+  };
+  const doResend = async () => {
+    if (!email.trim() || busy) return;
+    setBusy(true);
+    try { await resendVerification(email); } catch { /* generic by design */ }
+    finally { setBusy(false); setErr(''); }
   };
   const doForgot = async (e) => {
     e.preventDefault();
@@ -1432,6 +1455,25 @@ function AuthModal({ onClose, onAuthed, goDashboard, resetInfo }) {
           <Centered icon="◷" tone="amber" title="Account pending approval"
             body="Our team reviews every new member. You'll get an email as soon as your account is approved — usually within a day."
             action={<button onClick={go('login')} style={{ ...purpleBtn, padding: '12px 28px' }}>Back to log in</button>} />
+        )}
+        {view === 'verifying' && (
+          <Centered icon="◷" tone="neutral" title="Confirming your email"
+            body="One moment while we activate your account…" />
+        )}
+        {view === 'verify_done' && (
+          <Centered icon="✓" tone="green" title="Email confirmed"
+            body="Your account is active. Log in to start booking spaces."
+            action={<button onClick={go('login')} style={{ ...purpleBtn, padding: '12px 28px' }}>Log in</button>} />
+        )}
+        {view === 'verify_sent' && (
+          <Centered icon="✉" tone="amber" title="Confirm your email"
+            body={<>We've sent a confirmation link to <strong style={{ color: MS.ink }}>{email}</strong>. Click it to activate your account, then log in.</>}
+            action={
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
+                <button onClick={go('login')} style={{ ...purpleBtn, padding: '12px 28px' }}>Back to log in</button>
+                <button onClick={doResend} disabled={busy} style={{ ...ghostBtn, opacity: busy ? 0.7 : 1 }}>{busy ? 'Sending…' : 'Resend link'}</button>
+              </div>
+            } />
         )}
         {view === 'sent' && (
           <Centered icon="✉" tone="green" title="Check your inbox"

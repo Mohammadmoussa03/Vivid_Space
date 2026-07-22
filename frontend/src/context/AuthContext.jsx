@@ -56,6 +56,15 @@ export function AuthProvider({ children }) {
     await api.post('/auth/password-reset/confirm/', { uid, token, password });
   }, []);
 
+  const verifyEmail = useCallback(async (uid, token) => {
+    const { data } = await api.post('/auth/verify-email/', { uid, token });
+    return data;
+  }, []);
+
+  const resendVerification = useCallback(async (email) => {
+    await api.post('/auth/resend-verification/', { email });
+  }, []);
+
   const logout = useCallback(async () => {
     try { await api.post('/auth/logout/'); } catch { /* noop */ }
     persist(null);
@@ -63,7 +72,8 @@ export function AuthProvider({ children }) {
 
   const value = {
     user, role: user?.role, isAuthed: !!user, loading,
-    login, register, requestReset, confirmReset, logout, setUser: persist,
+    login, register, requestReset, confirmReset, verifyEmail, resendVerification,
+    logout, setUser: persist,
   };
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

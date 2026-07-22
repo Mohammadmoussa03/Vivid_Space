@@ -17,18 +17,18 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .cookies import clear_auth_cookies, set_auth_cookies
 from .emails import (
-    notify_owner_new_signup,
     send_email_already_registered,
+    send_email_verification,
     send_password_reset,
-    send_signup_received,
 )
 from .throttling import LoginAccountThrottle, LoginIPThrottle
-from .tokens import blacklist_user_tokens
+from .tokens import blacklist_user_tokens, email_verification_token
 from .serializers import (
     LoginSerializer,
     PasswordResetSerializer,
     ProfileUpdateSerializer,
     RegisterSerializer,
+    ResendVerificationSerializer,
     UserSerializer,
 )
 
@@ -36,7 +36,7 @@ User = get_user_model()
 
 
 class RegisterView(generics.CreateAPIView):
-    """POST /api/auth/register/ — create a pending member account."""
+    """POST /api/auth/register/ — create an account awaiting email confirmation."""
 
     serializer_class = RegisterSerializer
     permission_classes = [permissions.AllowAny]
@@ -46,8 +46,8 @@ class RegisterView(generics.CreateAPIView):
     # endpoint can't be used to enumerate accounts. The generic message avoids
     # confirming existence; the response never echoes the user back.
     GENERIC_RESPONSE = {
-        'detail': 'Thanks — if this email isn\'t already registered, your account '
-                  'has been created and you can now log in.',
+        'detail': 'Thanks — check your inbox for a link to confirm your email '
+                  'address and activate your account.',
     }
 
     def create(self, request, *args, **kwargs):
@@ -68,9 +68,8 @@ class RegisterView(generics.CreateAPIView):
             # generic response, still no enumeration signal.
             send_email_already_registered(email)
             return Response(self.GENERIC_RESPONSE, status=status.HTTP_201_CREATED)
-        # Confirm to the member and notify the owner (both best-effort).
-        send_signup_received(user)
-        notify_owner_new_signup(user)
+        # The account exists but can't log in until this link is clicked.
+        send_email_verification(user)
         return Response(self.GENERIC_RESPONSE, status=status.HTTP_201_CREATED)
 
 
@@ -212,6 +211,59 @@ class PasswordResetConfirmView(APIView):
         blacklist_user_tokens(user)
         return Response({'detail': 'Your password has been reset. You can now log in.'},
                         status=status.HTTP_200_OK)
+
+
+class VerifyEmailView(APIView):
+    """POST /api/auth/verify-email/ — confirm an address from the emailed link.
+
+    Body: {"uid": "...", "token": "..."} as carried by the link's query string.
+    """
+
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = 'verify_email'
+
+    def post(self, request):
+        uid = request.data.get('uid') or ''
+        token = request.data.get('token') or ''
+        try:
+            user = User.objects.get(pk=force_str(urlsafe_base64_decode(uid)))
+        except (User.DoesNotExist, ValueError, TypeError, OverflowError):
+            user = None
+        if user and user.email_verified:
+            # The link is single-use (email_verified is in the token hash), so a
+            # second click can't re-validate — treat it as success, not an error.
+            return Response({'detail': 'Your email is already confirmed. You can log in.'},
+                            status=status.HTTP_200_OK)
+        if not user or not email_verification_token.check_token(user, token):
+            return Response({'detail': 'This confirmation link is invalid or has expired.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        user.email_verified = True
+        user.save(update_fields=['email_verified'])
+        return Response({'detail': 'Email confirmed — you can now log in.'},
+                        status=status.HTTP_200_OK)
+
+
+class ResendVerificationView(APIView):
+    """POST /api/auth/resend-verification/ — send the confirmation link again.
+
+    Always returns 200, and stays silent for unknown or already-verified
+    addresses, so it can't be used to enumerate accounts.
+    """
+
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = 'verify_email'
+
+    def post(self, request):
+        serializer = ResendVerificationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = User.objects.filter(email__iexact=serializer.validated_data['email'],
+                                   is_active=True, email_verified=False).first()
+        if user:
+            send_email_verification(user)
+        return Response(
+            {'detail': 'If that account still needs confirming, a new link is on its way.'},
+            status=status.HTTP_200_OK,
+        )
 
 
 class MeView(generics.RetrieveUpdateAPIView):

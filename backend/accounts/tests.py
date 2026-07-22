@@ -2,11 +2,14 @@
 the security hardening (UUIDs, enumeration, password-reset revocation)."""
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
+from django.core import mail
 from django.urls import reverse
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
+
+from .tokens import email_verification_token
 
 User = get_user_model()
 
@@ -19,7 +22,7 @@ class CookieAuthTests(APITestCase):
         self.password = 'S3cure-pass!'
         self.user = User.objects.create_user(
             email='member@example.com', password=self.password,
-            is_approved=True, role=User.Role.MEMBER,
+            is_approved=True, email_verified=True, role=User.Role.MEMBER,
         )
 
     def _csrf_headers(self):
@@ -108,7 +111,7 @@ class HardeningTests(APITestCase):
         self.password = 'S3cure-pass!'
         self.user = User.objects.create_user(
             email='member@example.com', password=self.password,
-            is_approved=True, role=User.Role.MEMBER,
+            is_approved=True, email_verified=True, role=User.Role.MEMBER,
         )
 
     def _csrf_headers(self):
@@ -173,7 +176,8 @@ class HardeningTests(APITestCase):
     # --- admin user-create is blocked (not a 500) -----------------------------
     def test_admin_user_create_is_method_not_allowed(self):
         admin = User.objects.create_user(
-            email='admin@example.com', password='adminpass', is_approved=True, role=User.Role.ADMIN)
+            email='admin@example.com', password='adminpass', is_approved=True,
+            email_verified=True, role=User.Role.ADMIN)
         self.client.post(
             reverse('login'), {'email': admin.email, 'password': 'adminpass'}, format='json')
         resp = self.client.post(reverse('admin-user-list'), {'email': 'x@y.com'},
@@ -181,17 +185,104 @@ class HardeningTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
 
-class RegistrationApprovalTests(APITestCase):
-    def test_new_user_is_auto_approved_and_can_login(self):
-        r = self.client.post(reverse('register'), {
-            'email': 'newbie@example.com', 'password': 'S3cure-pass!',
+class EmailVerificationTests(APITestCase):
+    """Signup is gated on confirming the emailed link — no admin approval step."""
+
+    PASSWORD = 'S3cure-pass!'
+    EMAIL = 'newbie@example.com'
+
+    def _register(self):
+        return self.client.post(reverse('register'), {
+            'email': self.EMAIL, 'password': self.PASSWORD,
             'first_name': 'New', 'last_name': 'Bie',
         }, format='json')
-        self.assertEqual(r.status_code, status.HTTP_201_CREATED)
-        u = User.objects.get(email='newbie@example.com')
-        self.assertTrue(u.is_approved)
-        # Can log in immediately (no admin approval gate).
-        login = self.client.post(reverse('login'), {
-            'email': 'newbie@example.com', 'password': 'S3cure-pass!',
+
+    def _login(self):
+        return self.client.post(reverse('login'), {
+            'email': self.EMAIL, 'password': self.PASSWORD,
         }, format='json')
-        self.assertEqual(login.status_code, status.HTTP_200_OK)
+
+    def _link_parts(self, user):
+        return (urlsafe_base64_encode(force_bytes(user.pk)),
+                email_verification_token.make_token(user))
+
+    def test_signup_is_approved_but_unverified_and_cannot_login(self):
+        self.assertEqual(self._register().status_code, status.HTTP_201_CREATED)
+        u = User.objects.get(email=self.EMAIL)
+        self.assertTrue(u.is_approved)      # no admin gate
+        self.assertFalse(u.email_verified)  # but the email gate is closed
+        self.assertEqual(self._login().status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_registration_emails_a_working_confirmation_link(self):
+        self._register()
+        self.assertEqual(len(mail.outbox), 1)
+        u = User.objects.get(email=self.EMAIL)
+        # The link the member actually receives carries a valid token.
+        self.assertIn(f'verify_uid={urlsafe_base64_encode(force_bytes(u.pk))}',
+                      mail.outbox[0].body)
+
+    def test_verifying_then_logging_in_succeeds(self):
+        self._register()
+        uid, token = self._link_parts(User.objects.get(email=self.EMAIL))
+        resp = self.client.post(reverse('verify_email'), {'uid': uid, 'token': token},
+                                format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(User.objects.get(email=self.EMAIL).email_verified)
+        self.assertEqual(self._login().status_code, status.HTTP_200_OK)
+
+    def test_bad_token_is_rejected(self):
+        self._register()
+        uid, _ = self._link_parts(User.objects.get(email=self.EMAIL))
+        resp = self.client.post(reverse('verify_email'), {'uid': uid, 'token': 'nope'},
+                                format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(User.objects.get(email=self.EMAIL).email_verified)
+
+    def test_password_reset_token_cannot_confirm_an_email(self):
+        """The two link types use different salts and must not be interchangeable."""
+        self._register()
+        u = User.objects.get(email=self.EMAIL)
+        uid = urlsafe_base64_encode(force_bytes(u.pk))
+        resp = self.client.post(
+            reverse('verify_email'),
+            {'uid': uid, 'token': default_token_generator.make_token(u)}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_link_is_single_use_but_replay_reads_as_success(self):
+        self._register()
+        uid, token = self._link_parts(User.objects.get(email=self.EMAIL))
+        self.client.post(reverse('verify_email'), {'uid': uid, 'token': token}, format='json')
+        again = self.client.post(reverse('verify_email'), {'uid': uid, 'token': token},
+                                 format='json')
+        self.assertEqual(again.status_code, status.HTTP_200_OK)
+        self.assertIn('already confirmed', again.data['detail'])
+
+    def test_resend_is_silent_for_unknown_and_verified_addresses(self):
+        self._register()
+        mail.outbox.clear()
+        unknown = self.client.post(reverse('resend_verification'),
+                                   {'email': 'ghost@example.com'}, format='json')
+        self.assertEqual(unknown.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 0)
+
+        # A real unverified account does get a fresh link...
+        pending = self.client.post(reverse('resend_verification'),
+                                   {'email': self.EMAIL}, format='json')
+        self.assertEqual(len(mail.outbox), 1)
+
+        # ...but the same request for a verified one is a no-op with an
+        # identical response, so it can't be used to probe account state.
+        User.objects.filter(email=self.EMAIL).update(email_verified=True)
+        mail.outbox.clear()
+        verified = self.client.post(reverse('resend_verification'),
+                                    {'email': self.EMAIL}, format='json')
+        self.assertEqual(len(mail.outbox), 0)
+        self.assertEqual(pending.data, verified.data)
+
+    def test_admins_are_exempt_from_the_gate(self):
+        User.objects.create_user(email='boss@example.com', password=self.PASSWORD,
+                                 is_approved=True, email_verified=False,
+                                 role=User.Role.ADMIN)
+        resp = self.client.post(reverse('login'), {
+            'email': 'boss@example.com', 'password': self.PASSWORD}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
