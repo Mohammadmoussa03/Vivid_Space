@@ -63,8 +63,24 @@ as_root "nginx -t"
 as_root "systemctl reload nginx"
 
 log "Health check"
-code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/api/site/ || true)"
-echo "GET /api/site/ -> $code"
+# nginx routes on server_name, so once a real domain is configured a request to
+# a bare 127.0.0.1 lands on the catch-all and 404s even though the site is fine.
+# Ask for the site *by name* over the loopback instead. Falls back to the raw IP
+# in test mode, where every server block is the catch-all (`server_name _`).
+# `|| true` keeps a failing `nginx -T` from tripping `set -e` here — an
+# undiscoverable hostname should fall back, not abort a finished deploy.
+HEALTH_HOST="${HEALTH_HOST:-$({ as_root "nginx -T 2>/dev/null" || true; } \
+  | awk '$1=="server_name" { gsub(/;/,"",$2); if ($2 != "_") { print $2; exit } }')}"
+HEALTH_HOST="${HEALTH_HOST:-127.0.0.1}"
+# Prod redirects HTTP→HTTPS, so try TLS first (-k: the cert is for the domain,
+# not the loopback IP); test mode has no TLS listener and answers on plain HTTP.
+code="$(curl -sk -o /dev/null -w '%{http_code}' -H "Host: $HEALTH_HOST" \
+  https://127.0.0.1/api/site/ 2>/dev/null || true)"
+if [ "$code" != "200" ]; then
+  code="$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $HEALTH_HOST" \
+    http://127.0.0.1/api/site/ || true)"
+fi
+echo "GET /api/site/ (Host: $HEALTH_HOST) -> $code"
 [ "$code" = "200" ] || { echo "!! Health check failed"; exit 1; }
 
 log "Deploy complete — now at $(as_app "git -C '$APP_DIR' rev-parse --short HEAD")"
