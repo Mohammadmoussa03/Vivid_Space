@@ -47,11 +47,3 @@ Production runs on a single EC2 instance with RDS PostgreSQL and an S3 media buc
 all defined in [`terraform/`](terraform/). See [`AWS_DEPLOY.md`](AWS_DEPLOY.md) for the
 walkthrough and [`DEPLOY_CHECKLIST.md`](DEPLOY_CHECKLIST.md) for the go-live list.
 
-To ship application changes to a running server:
-
-```bash
-sudo bash /opt/vivid/app/deploy.sh
-```
-
-It pulls, installs, migrates, collects static files, rebuilds the frontend, restarts
-gunicorn, reloads nginx, and health-checks the site — aborting loudly on any failure.
