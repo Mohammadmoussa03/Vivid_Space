@@ -8,6 +8,14 @@ ENV_FILE=/opt/vivid/app/backend/.env
 BAK=/opt/vivid/app/backend/.env.pre-loadtest.bak
 MANAGE="/opt/vivid/app/backend/venv/bin/python /opt/vivid/app/backend/manage.py"
 
+# Public host the box answers on. Defaults to the instance's own public IP so the
+# address stays out of this (public) repo; override with BOX_HOST if needed.
+BOX_HOST="${BOX_HOST:-$(curl -sf --max-time 3 http://169.254.169.254/latest/meta-data/public-ipv4 || true)}"
+if [ -z "$BOX_HOST" ]; then
+  echo "Could not determine the box's public IP. Set BOX_HOST=<ip-or-hostname> and re-run." >&2
+  exit 1
+fi
+
 set_kv() { # set_kv KEY VALUE — replace in place, or append if absent
   local k=$1 v=$2
   if grep -qE "^${k}=" "$ENV_FILE"; then
@@ -27,7 +35,7 @@ case "${1:-}" in
     set_kv SECURE_SSL_REDIRECT False     # box is HTTP-only; DEBUG=False would 301 everything
     set_kv AUTH_COOKIE_SECURE False      # else JWT cookies never come back over HTTP
     set_kv SECURE_HSTS_SECONDS 0
-    set_kv DJANGO_ALLOWED_HOSTS '35.157.5.65,127.0.0.1,localhost'
+    set_kv DJANGO_ALLOWED_HOSTS "${BOX_HOST},127.0.0.1,localhost"
 
     # Lift rate limits so we measure the app, not the throttle.
     set_kv THROTTLE_ANON 1000000/min

@@ -11,8 +11,15 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const INSTANCE = process.env.VS_INSTANCE || 'i-09f2cd2937606ff4e';
+// Set VS_INSTANCE to the target instance ID (`tofu output`, or the EC2 console).
+// Deliberately not hardcoded -- this repo is public.
+const INSTANCE = process.env.VS_INSTANCE;
 const REGION = process.env.VS_REGION || 'eu-central-1';
+
+if (!INSTANCE) {
+  console.error('VS_INSTANCE is not set. Export the target EC2 instance ID first.');
+  process.exit(1);
+}
 
 const argv = process.argv.slice(2);
 const script = argv[0] === '--file' ? readFileSync(argv[1], 'utf8') : argv.join(' ');

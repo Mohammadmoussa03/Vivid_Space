@@ -106,14 +106,15 @@ nginx, cron).
   replaces the instance on the next `tofu apply` (RDS/S3/EIP untouched, EIP address preserved).
   Pushing only app-code changes needs `tofu apply -replace=aws_instance.web` to re-run the
   clone/build.
-- **Live box (PROD):** `eu-central-1`, instance `i-0e1d6091e632a943e`, EIP `35.157.5.65`,
-  serving `https://vividspace.space` (+ `www`) with Let's Encrypt TLS. Media bucket
-  `vivid-space-test-f6225b03`. Superuser `mhmadmoussa05@gmail.com` (pw in SSM
-  `/vivid/admin/password`). Tear down with `tofu destroy` after flipping
+- **Live box (PROD):** `eu-central-1`, serving `https://vividspace.space` (+ `www`) with
+  Let's Encrypt TLS. This repo is public, so the concrete identifiers are deliberately not
+  written down here — get the instance ID, Elastic IP, and media bucket from `tofu output`
+  (or the EC2/S3 console). The superuser email and its password live in SSM
+  (`/vivid/admin/*`). Tear down with `tofu destroy` after flipping
   `deletion_protection = false` on RDS.
-- **Remote state:** migrated to an encrypted, versioned S3 backend
-  (`vivid-space-tfstate-c6d8f380`, key `vivid-space/terraform.tfstate`, native `use_lockfile`
-  locking — see `versions.tf`). No local `*.tfstate` — the S3 object is authoritative.
+- **Remote state:** migrated to an encrypted, versioned S3 backend (bucket + key configured
+  in `versions.tf`, native `use_lockfile` locking). No local `*.tfstate` — the S3 object is
+  authoritative.
 - **Email (Resend — current):** domain `vividspace.space`, Resend region `eu-west-1`, added
   out-of-band via the Resend dashboard. DNS is in `resend.tf` (DKIM TXT `resend._domainkey`,
   SPF TXT + return-path MX on `send.<domain>` → `feedback-smtp.eu-west-1.amazonaws.com`;
@@ -127,8 +128,8 @@ nginx, cron).
   production access was never approved. Don't wire new mail through it.
 - **`OWNER_EMAIL` is not set in the live `.env`**, so it falls back to `settings.py`'s default
   `owner@vividspace.co` — the wrong domain. Harmless only because the real recipient comes from
-  `AdminSettings.notification_email` (currently `mhmadmoussa05@gmail.com`), which wins; clearing
-  that field in the admin panel would silently send all owner mail to a dead address.
+  `AdminSettings.notification_email` (set in Admin → Settings), which wins; clearing that
+  field in the admin panel would silently send all owner mail to a dead address.
 - **What's left for prod:** add CloudWatch alarms; consider IMDSv2 enforcement, a dedicated
   `vivid-media-prod` bucket, and ElastiCache/Multi-AZ when scaling.
 

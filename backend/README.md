@@ -43,12 +43,17 @@ python manage.py runserver
 
 The API serves at `http://localhost:8000/api/`.
 
-## Demo accounts (from `seed_demo`)
-| Role   | Email                   | Password   |
-|--------|-------------------------|------------|
-| Member | mohammad@loopstudio.co  | demo1234   |
-| Admin  | admin@vividspace.co     | admin1234  |
-| Pending signup | casey@northwind.io | demo1234 (awaiting approval) |
+## Demo accounts
+
+`seed_demo` creates a member, an admin, and a pending signup for local development.
+The emails and passwords are defined in
+`bookings/management/commands/seed_demo.py` — read them there.
+
+> **Local development only.** These are weak, well-known passwords and the admin is a
+> full superuser. Never run `seed_demo` against a production or staging database; create
+> the real admin with `python manage.py createsuperuser` instead. Note that re-running
+> `seed_demo` resets the password on an *existing* account with a matching email, not
+> just newly created ones.
 
 ## Endpoints
 
