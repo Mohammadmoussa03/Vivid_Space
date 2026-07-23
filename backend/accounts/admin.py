@@ -1,7 +1,17 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
-from .models import User
+from .models import SocialAccount, User
+
+
+class SocialAccountInline(admin.TabularInline):
+    """Which third-party identities can sign in as this member."""
+
+    model = SocialAccount
+    extra = 0
+    can_delete = True   # unlinking is the only edit that makes sense here
+    readonly_fields = ('provider', 'provider_uid', 'provider_email',
+                       'created_at', 'last_login_at')
 
 
 @admin.register(User)
@@ -27,6 +37,8 @@ class UserAdmin(BaseUserAdmin):
                        'is_approved', 'password1', 'password2'),
         }),
     )
+
+    inlines = [SocialAccountInline]
 
     actions = ['approve_users']
 

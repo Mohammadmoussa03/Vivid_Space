@@ -10,6 +10,11 @@ function loadUser() {
   try { return JSON.parse(localStorage.getItem(USER_KEY)); } catch { return null; }
 }
 
+// Email is the login credential and is stored lowercased server-side; trim and
+// lowercase here too so a stray capital (or mobile auto-capitalisation) can't
+// look like a wrong address. The backend normalises again — this is for UX.
+const normEmail = (v) => (v || '').trim().toLowerCase();
+
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(loadUser);
   const [loading, setLoading] = useState(true);
@@ -38,18 +43,26 @@ export function AuthProvider({ children }) {
 
   const login = useCallback(async (email, password) => {
     // Backend sets the httpOnly JWT cookies; body carries only the user profile.
-    const { data } = await api.post('/auth/login/', { email, password });
+    const { data } = await api.post('/auth/login/', { email: normEmail(email), password });
+    persist(data.user);
+    return data.user;
+  }, [persist]);
+
+  // Social sign-in: the provider's ID token is all the backend needs — it
+  // verifies it and issues the same httpOnly cookie session as a password login.
+  const loginWithGoogle = useCallback(async (credential) => {
+    const { data } = await api.post('/auth/social/google/', { credential });
     persist(data.user);
     return data.user;
   }, [persist]);
 
   const register = useCallback(async (payload) => {
-    const { data } = await api.post('/auth/register/', payload);
+    const { data } = await api.post('/auth/register/', { ...payload, email: normEmail(payload.email) });
     return data;
   }, []);
 
   const requestReset = useCallback(async (email) => {
-    await api.post('/auth/password-reset/', { email });
+    await api.post('/auth/password-reset/', { email: normEmail(email) });
   }, []);
 
   const confirmReset = useCallback(async (uid, token, password) => {
@@ -62,7 +75,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   const resendVerification = useCallback(async (email) => {
-    await api.post('/auth/resend-verification/', { email });
+    await api.post('/auth/resend-verification/', { email: normEmail(email) });
   }, []);
 
   const logout = useCallback(async () => {
@@ -72,7 +85,7 @@ export function AuthProvider({ children }) {
 
   const value = {
     user, role: user?.role, isAuthed: !!user, loading,
-    login, register, requestReset, confirmReset, verifyEmail, resendVerification,
+    login, loginWithGoogle, register, requestReset, confirmReset, verifyEmail, resendVerification,
     logout, setUser: persist,
   };
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -5,22 +5,17 @@ triggered it, so all sends are wrapped and use fail_silently.
 """
 from django.conf import settings
 from django.contrib.auth.tokens import default_token_generator
-from django.core.mail import send_mail
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
+
+from config.mail import send_branded_mail
 
 from .tokens import email_verification_token
 
 
 def _send(subject, body, recipient):
-    if not recipient:
-        return
-    try:
-        send_mail(subject, body, settings.DEFAULT_FROM_EMAIL,
-                  [recipient] if isinstance(recipient, str) else list(recipient),
-                  fail_silently=True)
-    except Exception:
-        pass
+    """Branded HTML + plain-text send; never raises into the caller."""
+    send_branded_mail(subject, body, recipient)
 
 
 def build_verify_url(user):

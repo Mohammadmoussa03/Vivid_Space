@@ -206,6 +206,7 @@ REST_FRAMEWORK = {
         'register': env('THROTTLE_REGISTER', '5/min'),
         'password_reset': env('THROTTLE_PASSWORD_RESET', '5/min'),
         'verify_email': env('THROTTLE_VERIFY_EMAIL', '10/min'),
+        'social_auth': env('THROTTLE_SOCIAL_AUTH', '20/min'),
         # Public, unauthenticated write endpoints that each send the owner an email.
         'tour': env('THROTTLE_TOUR', '5/min'),
         'customize': env('THROTTLE_CUSTOMIZE', '5/min'),
@@ -300,19 +301,32 @@ else:
 # The SPA is served separately (Vite/static host); this primarily hardens
 # Django-served responses (API errors, /django-admin). Override per-env if a
 # production static host should send its own stricter policy for the SPA HTML.
+#
+# Social sign-in needs the provider's script, its token iframe, and (for the
+# One Tap/popup flows) XHR back to it — a bare 'self' policy silently breaks
+# the button: it renders, but clicking it does nothing.
 CONTENT_SECURITY_POLICY = env(
     'CONTENT_SECURITY_POLICY',
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline'; "
-    "style-src 'self' 'unsafe-inline'; "
+    "script-src 'self' 'unsafe-inline' https://accounts.google.com https://apis.google.com; "
+    "style-src 'self' 'unsafe-inline' https://accounts.google.com; "
     "img-src 'self' data: https:; "
     "media-src 'self' https:; "
     "font-src 'self' data:; "
-    "connect-src 'self'; "
+    "connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com "
+    "https://www.googleapis.com; "
+    "frame-src 'self' https://accounts.google.com; "
     "frame-ancestors 'none'; "
     "base-uri 'self'; "
     "form-action 'self'",
 )
+
+# Google Identity Services OAuth 2.0 Web client id. Public by design (it ships
+# in the frontend bundle); the matching client *secret* is not used by the
+# ID-token flow and must not be added here.
+GOOGLE_OAUTH_CLIENT_ID = env('GOOGLE_OAUTH_CLIENT_ID', '')
+# Reserved for Sign in with Apple (the Services ID) — not wired up yet.
+APPLE_OAUTH_CLIENT_ID = env('APPLE_OAUTH_CLIENT_ID', '')
 
 
 # Email — defaults to the console backend (emails print to the runserver console).

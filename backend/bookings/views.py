@@ -12,6 +12,8 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from config.mail import send_branded_mail
+
 from .models import (
     AdminSettings, BlockedSlot, Booking, CustomizationRequest, FAQ, GalleryImage,
     Membership, MembershipPlan, Order, PackageCategory, SiteContent, Space,
@@ -799,8 +801,6 @@ def _booking_length_hours(booking):
 
 def _send_booking_confirmation(booking):
     """Email the member a confirmation of their booking (console backend)."""
-    from django.conf import settings as dj_settings
-    from django.core.mail import send_mail
 
     user = booking.user
     if not user.email:
@@ -827,24 +827,18 @@ def _send_booking_confirmation(booking):
         + (f'Attendees: {booking.attendees}\n' if booking.attendees else '')
         + closing
     )
-    try:
-        send_mail(
-            subject=(f'Booking request received — {booking.space.name} on {booking.date:%d %b}'
-                     if pending else
-                     f'Booking confirmed — {booking.space.name} on {booking.date:%d %b}'),
-            message=body,
-            from_email=dj_settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email],
-            fail_silently=True,
-        )
-    except Exception:
-        pass
+    send_branded_mail(
+        subject=(f'Booking request received — {booking.space.name} on {booking.date:%d %b}'
+                 if pending else
+                 f'Booking confirmed — {booking.space.name} on {booking.date:%d %b}'),
+        body=body,
+        recipients=[user.email],
+    )
 
 
 def _notify_owner_of_booking(booking):
     """Email the site owner that a client booked a space (console backend)."""
     from django.conf import settings as dj_settings
-    from django.core.mail import send_mail
 
     recipient = (AdminSettings.load().notification_email
                  or getattr(dj_settings, 'OWNER_EMAIL', '') or dj_settings.DEFAULT_FROM_EMAIL)
@@ -876,16 +870,11 @@ def _notify_owner_of_booking(booking):
         + (f'Attendees: {booking.attendees}\n' if booking.attendees else '')
         + f'Payment: {pay}\n'
     )
-    try:
-        send_mail(
-            subject=f'New booking — {booking.space.name} by {user.full_name}',
-            message=body,
-            from_email=dj_settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[recipient],
-            fail_silently=True,
-        )
-    except Exception:
-        pass
+    send_branded_mail(
+        subject=f'New booking — {booking.space.name} by {user.full_name}',
+        body=body,
+        recipients=[recipient],
+    )
 
 
 def _describe_slot(booking, when_date, start):
@@ -901,7 +890,6 @@ def _describe_slot(booking, when_date, start):
 def _notify_owner_of_change_request(booking):
     """Email the owner that a member wants to reschedule a booking (console backend)."""
     from django.conf import settings as dj_settings
-    from django.core.mail import send_mail
 
     recipient = (AdminSettings.load().notification_email
                  or getattr(dj_settings, 'OWNER_EMAIL', '') or dj_settings.DEFAULT_FROM_EMAIL)
@@ -921,22 +909,15 @@ def _notify_owner_of_change_request(booking):
         f'Review it in the admin panel under Daily Bookings → Change requests to '
         f'approve or reject.\n'
     )
-    try:
-        send_mail(
-            subject=f'Booking change request — {booking.space.name} by {user.full_name}',
-            message=body,
-            from_email=dj_settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[recipient],
-            fail_silently=True,
-        )
-    except Exception:
-        pass
+    send_branded_mail(
+        subject=f'Booking change request — {booking.space.name} by {user.full_name}',
+        body=body,
+        recipients=[recipient],
+    )
 
 
 def _send_change_result(booking, approved):
     """Email the member the outcome of their reschedule request (best-effort)."""
-    from django.conf import settings as dj_settings
-    from django.core.mail import send_mail
 
     user = booking.user
     if not user.email:
@@ -961,14 +942,11 @@ def _send_change_result(booking, approved):
             f'Booking: {slot}\n\n'
             f'Feel free to submit a new request or contact us for help.\n'
         )
-    try:
-        send_mail(
-            subject=subject, message=body,
-            from_email=dj_settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email], fail_silently=True,
-        )
-    except Exception:
-        pass
+    send_branded_mail(
+        subject=subject,
+        body=body,
+        recipients=[user.email],
+    )
 
 
 def _schedule_breakdown(components):
@@ -992,7 +970,6 @@ def _schedule_breakdown(components):
 def _notify_owner_of_schedule_change(membership):
     """Email the owner that a member proposed a package-schedule edit (console backend)."""
     from django.conf import settings as dj_settings
-    from django.core.mail import send_mail
 
     recipient = (AdminSettings.load().notification_email
                  or getattr(dj_settings, 'OWNER_EMAIL', '') or dj_settings.DEFAULT_FROM_EMAIL)
@@ -1007,22 +984,15 @@ def _notify_owner_of_schedule_change(membership):
         f'Requested schedule:\n{_schedule_breakdown(membership.pending_components)}\n\n'
         f'Review it in the admin panel under Users to approve or reject.\n'
     )
-    try:
-        send_mail(
-            subject=f'Schedule change request — {user.full_name}',
-            message=body,
-            from_email=dj_settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[recipient],
-            fail_silently=True,
-        )
-    except Exception:
-        pass
+    send_branded_mail(
+        subject=f'Schedule change request — {user.full_name}',
+        body=body,
+        recipients=[recipient],
+    )
 
 
 def _send_schedule_change_result(membership, approved):
     """Email the member the outcome of their schedule-change request (best-effort)."""
-    from django.conf import settings as dj_settings
-    from django.core.mail import send_mail
 
     user = membership.user
     if not user.email:
@@ -1046,20 +1016,15 @@ def _send_schedule_change_result(membership, approved):
             f'Schedule:\n{_schedule_breakdown(membership.custom_components)}\n\n'
             f'Feel free to submit a new request or contact us for help.\n'
         )
-    try:
-        send_mail(
-            subject=subject, message=body,
-            from_email=dj_settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email], fail_silently=True,
-        )
-    except Exception:
-        pass
+    send_branded_mail(
+        subject=subject,
+        body=body,
+        recipients=[user.email],
+    )
 
 
 def _send_booking_cancellation(booking):
     """Email the member confirming their booking was cancelled (best-effort)."""
-    from django.conf import settings as dj_settings
-    from django.core.mail import send_mail
 
     user = booking.user
     if not user.email:
@@ -1074,16 +1039,11 @@ def _send_booking_cancellation(booking):
            if booking.space.uses_free_hours else '')
         + '\nHope to see you again soon.\n'
     )
-    try:
-        send_mail(
-            subject=f'Booking cancelled — {booking.space.name} on {booking.date:%d %b}',
-            message=body,
-            from_email=dj_settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email],
-            fail_silently=True,
-        )
-    except Exception:
-        pass
+    send_branded_mail(
+        subject=f'Booking cancelled — {booking.space.name} on {booking.date:%d %b}',
+        body=body,
+        recipients=[user.email],
+    )
 
 
 def _refund_free_hours(booking):
@@ -1164,7 +1124,6 @@ def apply_booking_change(booking, new_date, duration, start, end, hours):
 def _notify_owner_of_tour(tour):
     """Email the site owner about a new Book-a-Tour submission (console backend)."""
     from django.conf import settings as dj_settings
-    from django.core.mail import send_mail
 
     recipient = (AdminSettings.load().notification_email
                  or getattr(dj_settings, 'OWNER_EMAIL', '') or dj_settings.DEFAULT_FROM_EMAIL)
@@ -1176,23 +1135,16 @@ def _notify_owner_of_tour(tour):
         f'Phone: {tour.phone}\n'
         f'Promo code: {promo}\n'
     )
-    try:
-        send_mail(
-            subject=f'New tour request — {tour.full_name}',
-            message=body,
-            from_email=dj_settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[recipient],
-            fail_silently=True,
-        )
-    except Exception:
-        # Never let a mail failure block the tour submission.
-        pass
+    send_branded_mail(
+        subject=f'New tour request — {tour.full_name}',
+        body=body,
+        recipients=[recipient],
+    )
 
 
 def _notify_owner_of_customization(data):
     """Email the site owner about a 'customize my package' enquiry (console backend)."""
     from django.conf import settings as dj_settings
-    from django.core.mail import send_mail
 
     recipient = (AdminSettings.load().notification_email
                  or getattr(dj_settings, 'OWNER_EMAIL', '') or dj_settings.DEFAULT_FROM_EMAIL)
@@ -1223,14 +1175,8 @@ def _notify_owner_of_customization(data):
         f"{breakdown}\n"
         f"\nDetails:\n{details or '—'}\n"
     )
-    try:
-        send_mail(
-            subject=f"Package customization request — {data['name']}",
-            message=body,
-            from_email=dj_settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[recipient],
-            fail_silently=True,
-        )
-    except Exception:
-        # Never let a mail failure block the customization submission.
-        pass
+    send_branded_mail(
+        subject=f"Package customization request — {data['name']}",
+        body=body,
+        recipients=[recipient],
+    )

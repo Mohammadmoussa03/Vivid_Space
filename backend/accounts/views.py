@@ -15,7 +15,12 @@ from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
+from django.db import transaction
+from django.utils import timezone
+
 from .cookies import clear_auth_cookies, set_auth_cookies
+from .models import SocialAccount, normalize_email
+from .social import PROVIDERS, SocialAuthError, extract_identity, verify_id_token
 from .emails import (
     send_email_already_registered,
     send_email_verification,
@@ -99,6 +104,110 @@ class LoginView(TokenObtainPairView):
         )
         set_auth_cookies(response, access=data['access'], refresh=data['refresh'])
         return response
+
+
+class SocialLoginView(APIView):
+    """Exchange a provider ID token for this app's own session cookies.
+
+    The provider only ever proves *identity*; the session itself is the same
+    httpOnly-cookie JWT pair every other login issues, so nothing downstream
+    (CSRF, rotation, blacklist) needs to know social sign-in exists.
+
+    Subclass and set `provider_key` to add a provider.
+    """
+
+    provider_key = None
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = 'social_auth'
+
+    def post(self, request):
+        provider = PROVIDERS[self.provider_key]
+        client_id = getattr(settings, provider.client_id_setting, '')
+        # `credential` is what Google Identity Services calls it; `id_token` is
+        # the generic name and what Apple's JS returns.
+        token = request.data.get('credential') or request.data.get('id_token') or ''
+
+        try:
+            claims = verify_id_token(provider, token, client_id)
+            identity = extract_identity(provider, claims)
+        except SocialAuthError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        user, created = self._resolve_user(provider, identity)
+
+        if not user.is_active:
+            return Response({'detail': 'This account has been deactivated.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        if not user.is_approved and not user.is_admin:
+            return Response(
+                {'detail': 'Your account is pending approval. We\'ll email you once it\'s active.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        refresh = RefreshToken.for_user(user)
+        response = Response(
+            {'user': UserSerializer(user).data,
+             'csrftoken': get_token(request),
+             'created': created},
+            status=status.HTTP_200_OK,
+        )
+        set_auth_cookies(response, access=str(refresh.access_token), refresh=str(refresh))
+        return response
+
+    @transaction.atomic
+    def _resolve_user(self, provider, identity):
+        """Find, link, or create the local account behind a verified identity.
+
+        Returns (user, created). Three cases, in order of trust:
+        1. We've seen this provider subject before — the linked user, whatever
+           their address is now.
+        2. A local account already owns the (provider-verified) address — link
+           the identity to it rather than forking a second account.
+        3. Nobody owns it — create a member, already email-verified.
+        """
+        email = normalize_email(identity['email'])
+        link = (SocialAccount.objects
+                .select_related('user')
+                .filter(provider=provider.key, provider_uid=identity['uid'])
+                .first())
+        if link:
+            link.last_login_at = timezone.now()
+            link.provider_email = email
+            link.save(update_fields=['last_login_at', 'provider_email'])
+            return link.user, False
+
+        user = User.objects.filter(email__iexact=email).first()
+        created = False
+        if user is None:
+            # No password is set, so the password login path stays closed for
+            # this account until the member sets one via "Forgot password".
+            user = User.objects.create_user(
+                email=email,
+                password=None,
+                first_name=identity['first_name'],
+                last_name=identity['last_name'],
+                is_approved=True,
+                email_verified=True,   # the provider vouched for the address
+                role=User.Role.MEMBER,
+            )
+            created = True
+        elif not user.email_verified:
+            # A verified provider address settles the question for an account
+            # that signed up but never clicked the confirmation link.
+            user.email_verified = True
+            user.save(update_fields=['email_verified'])
+
+        SocialAccount.objects.create(
+            user=user, provider=provider.key, provider_uid=identity['uid'],
+            provider_email=email, last_login_at=timezone.now(),
+        )
+        return user, created
+
+
+class GoogleLoginView(SocialLoginView):
+    """POST /api/auth/social/google/ — body: {"credential": "<GIS ID token>"}."""
+
+    provider_key = 'google'
 
 
 class CookieTokenRefreshView(APIView):

@@ -3,6 +3,8 @@ from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
+from .models import normalize_email
+
 User = get_user_model()
 
 
@@ -35,7 +37,7 @@ class RegisterSerializer(serializers.ModelSerializer):
     def validate_email(self, value):
         # Normalise only. Uniqueness/existence is handled in the view so the
         # response can't be used to enumerate registered accounts.
-        return value.strip().lower()
+        return normalize_email(value)
 
     def validate_password(self, value):
         validate_password(value)
@@ -62,6 +64,11 @@ class LoginSerializer(TokenObtainPairSerializer):
     username_field = User.USERNAME_FIELD
 
     def validate(self, attrs):
+        # Sign-in must not care about the capitalisation the member typed — the
+        # stored address is canonical, so canonicalise the credential too.
+        raw_email = attrs.get(self.username_field)
+        if isinstance(raw_email, str):
+            attrs[self.username_field] = normalize_email(raw_email)
         data = super().validate(attrs)
         if not self.user.is_approved and not self.user.is_admin:
             raise serializers.ValidationError(
@@ -87,17 +94,26 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         fields = ('first_name', 'last_name', 'email', 'company')
 
     def validate_email(self, value):
-        value = value.strip().lower()
-        qs = User.objects.filter(email=value).exclude(pk=self.instance.pk)
+        value = normalize_email(value)
+        qs = User.objects.filter(email__iexact=value).exclude(pk=self.instance.pk)
         if qs.exists():
             # Neutral wording so this isn't a clean account-enumeration oracle.
             raise serializers.ValidationError("This email can't be used. Try another.")
         return value
 
 
-class PasswordResetSerializer(serializers.Serializer):
+class EmailLookupSerializer(serializers.Serializer):
+    """Base for endpoints that take an address and look the account up by it."""
+
     email = serializers.EmailField()
 
+    def validate_email(self, value):
+        return normalize_email(value)
 
-class ResendVerificationSerializer(serializers.Serializer):
-    email = serializers.EmailField()
+
+class PasswordResetSerializer(EmailLookupSerializer):
+    pass
+
+
+class ResendVerificationSerializer(EmailLookupSerializer):
+    pass

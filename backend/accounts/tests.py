@@ -1,17 +1,38 @@
 """Auth-flow tests: httpOnly cookie transport, rotation, blacklist, CSRF, and
 the security hardening (UUIDs, enumeration, password-reset revocation)."""
+import time
+from unittest import mock
+
+import jwt
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core import mail
+from django.test import override_settings
 from django.urls import reverse
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
+from . import social
+from .models import SocialAccount
 from .tokens import email_verification_token
 
 User = get_user_model()
+
+
+class _StubJWKClient:
+    """Stands in for PyJWKClient so tests never touch Google's JWKS endpoint.
+
+    Returns the public half of the test keypair for any token, which keeps the
+    real signature verification in play - only the key *fetch* is stubbed.
+    """
+
+    def __init__(self, private_key):
+        self._key = private_key.public_key()
+
+    def get_signing_key_from_jwt(self, token):
+        return mock.Mock(key=self._key)
 
 ACCESS = 'vs_access'
 REFRESH = 'vs_refresh'
@@ -286,3 +307,292 @@ class EmailVerificationTests(APITestCase):
         resp = self.client.post(reverse('login'), {
             'email': 'boss@example.com', 'password': self.PASSWORD}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+
+class EmailCaseInsensitivityTests(APITestCase):
+    """Email is the credential: capitalisation must never split an account."""
+
+    PASSWORD = 'S3cure-pass!'
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email='Casey@Example.COM', password=self.PASSWORD,
+            is_approved=True, email_verified=True, role=User.Role.MEMBER,
+        )
+
+    def test_stored_email_is_canonicalised_on_write(self):
+        self.assertEqual(self.user.email, 'casey@example.com')
+        # Direct assignment + save (django-admin / shell path) normalises too.
+        self.user.email = '  MiXeD@Example.com '
+        self.user.save()
+        self.assertEqual(User.objects.get(pk=self.user.pk).email, 'mixed@example.com')
+
+    def test_login_accepts_any_capitalisation(self):
+        for typed in ('casey@example.com', 'Casey@Example.COM', ' CASEY@EXAMPLE.COM '):
+            resp = self.client.post(reverse('login'),
+                                    {'email': typed, 'password': self.PASSWORD},
+                                    format='json')
+            self.assertEqual(resp.status_code, status.HTTP_200_OK, typed)
+
+    def test_registration_normalises_and_cannot_duplicate_by_case(self):
+        resp = self.client.post(reverse('register'), {
+            'email': '  NewBie@Example.COM ', 'password': self.PASSWORD,
+            'first_name': 'New', 'last_name': 'Bie',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(User.objects.filter(email='newbie@example.com').exists())
+
+        # A second signup that differs only in case is the existing-account
+        # path, not a new row (and stays non-enumerating).
+        mail.outbox.clear()
+        again = self.client.post(reverse('register'), {
+            'email': 'NEWBIE@example.com', 'password': self.PASSWORD,
+            'first_name': 'Imp', 'last_name': 'Ostor',
+        }, format='json')
+        self.assertEqual(again.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(User.objects.filter(email__iexact='newbie@example.com').count(), 1)
+
+    def test_password_reset_and_resend_find_the_account_by_any_case(self):
+        mail.outbox.clear()
+        self.client.post(reverse('password_reset'),
+                         {'email': 'CASEY@example.com'}, format='json')
+        self.assertEqual(len(mail.outbox), 1)
+
+        User.objects.filter(pk=self.user.pk).update(email_verified=False)
+        mail.outbox.clear()
+        self.client.post(reverse('resend_verification'),
+                         {'email': 'Casey@EXAMPLE.com'}, format='json')
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_profile_update_rejects_an_email_taken_in_another_case(self):
+        other = User.objects.create_user(
+            email='taken@example.com', password=self.PASSWORD,
+            is_approved=True, email_verified=True, role=User.Role.MEMBER,
+        )
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.patch(reverse('me'), {'email': 'TAKEN@Example.com'},
+                                 format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(User.objects.get(pk=other.pk).email, 'taken@example.com')
+
+    def test_profile_update_stores_the_lowercase_form(self):
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.patch(reverse('me'), {'email': 'Casey.New@Example.COM'},
+                                 format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(User.objects.get(pk=self.user.pk).email, 'casey.new@example.com')
+
+
+class GoogleSignInTests(APITestCase):
+    """Google sign-in: real RS256 verification against a stubbed JWKS.
+
+    The token is signed with a throwaway keypair and PyJWKClient is pointed at
+    it, so these exercise the actual signature/`aud`/`iss`/expiry path rather
+    than mocking the verifier out.
+    """
+
+    CLIENT_ID = 'test-client-id.apps.googleusercontent.com'
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        cls.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    def setUp(self):
+        social.reset_jwks_cache()
+        patcher = mock.patch.object(
+            social, '_jwk_client', return_value=_StubJWKClient(self.private_key))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(social.reset_jwks_cache)
+
+    def _token(self, **overrides):
+        now = int(time.time())
+        claims = {
+            'iss': 'https://accounts.google.com',
+            'aud': self.CLIENT_ID,
+            'sub': '1234567890',
+            'email': 'Gina@Example.com',
+            'email_verified': True,
+            'given_name': 'Gina',
+            'family_name': 'Ng',
+            'iat': now,
+            'exp': now + 3600,
+        }
+        claims.update(overrides)
+        return jwt.encode(claims, self.private_key, algorithm='RS256')
+
+    def _post(self, token):
+        return self.client.post(reverse('social_google'), {'credential': token},
+                                format='json')
+
+    # --- happy paths ---------------------------------------------------------
+
+    def test_new_user_is_created_verified_and_signed_in(self):
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID=self.CLIENT_ID):
+            resp = self._post(self._token())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data['created'])
+
+        user = User.objects.get(email='gina@example.com')   # normalised
+        self.assertTrue(user.email_verified)   # provider vouched for it
+        self.assertTrue(user.is_approved)
+        self.assertEqual(user.first_name, 'Gina')
+        self.assertFalse(user.has_usable_password())
+        self.assertEqual(user.social_accounts.get().provider_uid, '1234567890')
+
+        # Same session transport as a password login: httpOnly cookies, no
+        # tokens in the body.
+        self.assertTrue(resp.cookies[ACCESS]['httponly'])
+        self.assertTrue(resp.cookies[REFRESH]['httponly'])
+        self.assertNotIn('access', resp.data)
+
+    def test_returning_user_is_matched_by_subject_not_email(self):
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID=self.CLIENT_ID):
+            self._post(self._token())
+            # Same `sub`, address changed at Google — still the same account.
+            again = self._post(self._token(email='gina.ng@example.com'))
+        self.assertEqual(again.status_code, status.HTTP_200_OK)
+        self.assertFalse(again.data['created'])
+        self.assertEqual(User.objects.count(), 1)
+        self.assertEqual(SocialAccount.objects.count(), 1)
+
+    def test_links_to_an_existing_password_account_with_the_same_email(self):
+        existing = User.objects.create_user(
+            email='gina@example.com', password='S3cure-pass!',
+            is_approved=True, email_verified=True, role=User.Role.MEMBER)
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID=self.CLIENT_ID):
+            resp = self._post(self._token())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(resp.data['created'])
+        self.assertEqual(User.objects.count(), 1)
+        self.assertEqual(existing.social_accounts.count(), 1)
+        # The password still works — linking adds a way in, it doesn't replace one.
+        existing.refresh_from_db()
+        self.assertTrue(existing.check_password('S3cure-pass!'))
+
+    def test_google_settles_a_never_confirmed_signup(self):
+        User.objects.create_user(email='gina@example.com', password='S3cure-pass!',
+                                 is_approved=True, email_verified=False,
+                                 role=User.Role.MEMBER)
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID=self.CLIENT_ID):
+            self._post(self._token())
+        self.assertTrue(User.objects.get(email='gina@example.com').email_verified)
+
+    # --- rejections ----------------------------------------------------------
+
+    def test_token_for_another_client_id_is_rejected(self):
+        """The confused-deputy case: a valid Google token minted for a different app."""
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID=self.CLIENT_ID):
+            resp = self._post(self._token(aud='someone-elses-app.apps.googleusercontent.com'))
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(User.objects.count(), 0)
+
+    def test_unverified_email_is_rejected(self):
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID=self.CLIENT_ID):
+            resp = self._post(self._token(email_verified=False))
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(User.objects.count(), 0)
+
+    def test_expired_token_is_rejected(self):
+        now = int(time.time())
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID=self.CLIENT_ID):
+            resp = self._post(self._token(iat=now - 7200, exp=now - 3600))
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_token_signed_by_the_wrong_key_is_rejected(self):
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        attacker = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        now = int(time.time())
+        forged = jwt.encode({
+            'iss': 'https://accounts.google.com', 'aud': self.CLIENT_ID,
+            'sub': 'attacker', 'email': 'admin@example.com', 'email_verified': True,
+            'iat': now, 'exp': now + 3600,
+        }, attacker, algorithm='RS256')
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID=self.CLIENT_ID):
+            resp = self._post(forged)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(User.objects.count(), 0)
+
+    def test_wrong_issuer_is_rejected(self):
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID=self.CLIENT_ID):
+            resp = self._post(self._token(iss='https://evil.example.com'))
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_endpoint_is_inert_when_not_configured(self):
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID=''):
+            resp = self._post(self._token())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(User.objects.count(), 0)
+
+    def test_deactivated_account_cannot_sign_in_with_google(self):
+        User.objects.create_user(email='gina@example.com', password='S3cure-pass!',
+                                 is_approved=True, email_verified=True,
+                                 is_active=False, role=User.Role.MEMBER)
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID=self.CLIENT_ID):
+            resp = self._post(self._token())
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class BrandedEmailTests(APITestCase):
+    """Every outgoing email carries the logo and a plain-text fallback."""
+
+    def _send(self, body='Hi there,\n\nVisit https://vividspace.space/ to continue.\n'):
+        from config.mail import send_branded_mail
+        send_branded_mail('Subject line', body, 'casey@example.com')
+        return mail.outbox[-1]
+
+    def test_message_has_text_and_html_parts_with_an_inline_logo(self):
+        msg = self._send()
+        self.assertEqual([mime for _, mime in msg.alternatives], ['text/html'])
+        # multipart/related is what makes the cid: reference resolve in-body
+        # rather than showing up as a downloadable attachment.
+        self.assertEqual(msg.message().get_content_type(), 'multipart/related')
+
+        images = [p for p in msg.message().walk() if p.get_content_type() == 'image/png']
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0].get('Content-ID'), '<vividspace-logo>')
+        self.assertIn('inline', images[0].get('Content-Disposition'))
+        self.assertIn('src="cid:vividspace-logo"', msg.alternatives[0][0])
+
+    def test_plain_text_body_is_preserved_verbatim(self):
+        """Text-only clients must still get exactly what they got before."""
+        body = 'Hi there,\n\nVisit https://vividspace.space/ to continue.\n'
+        self.assertEqual(self._send(body).body, body)
+
+    def test_urls_become_clickable_and_content_is_escaped(self):
+        msg = self._send('Reset: https://vividspace.space/?a=1&b=2\n\n<script>x</script>')
+        html = msg.alternatives[0][0]
+        self.assertIn('href="https://vividspace.space/?a=1&amp;b=2"', html)
+        # Body text is escaped, so a stray angle bracket can't inject markup.
+        self.assertNotIn('<script>', html)
+        self.assertIn('&lt;script&gt;', html)
+
+    def test_real_transactional_emails_are_branded(self):
+        """Spot-check a live send path rather than only the helper."""
+        user = User.objects.create_user(email='casey@example.com', password='S3cure-pass!',
+                                        is_approved=True, email_verified=True)
+        mail.outbox.clear()
+        from accounts.emails import send_password_reset
+        send_password_reset(user)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn('src="cid:vividspace-logo"', mail.outbox[0].alternatives[0][0])
+
+    def test_missing_logo_degrades_to_a_plain_send(self):
+        """A missing asset must not break the request that triggered the email."""
+        from config import mail as mail_mod
+        mail_mod._logo_bytes.cache_clear()
+        self.addCleanup(mail_mod._logo_bytes.cache_clear)
+        with mock.patch.object(mail_mod, 'LOGO_PATH', mail_mod.LOGO_PATH.parent / 'nope.png'):
+            msg = self._send()
+        self.assertEqual(len(msg.attachments), 0)
+        self.assertNotIn('cid:', msg.alternatives[0][0])
+        self.assertTrue(msg.body)   # the text email still goes out
+
+    def test_no_recipient_is_a_no_op(self):
+        from config.mail import send_branded_mail
+        mail.outbox.clear()
+        self.assertEqual(send_branded_mail('s', 'b', ''), 0)
+        self.assertEqual(send_branded_mail('s', 'b', []), 0)
+        self.assertEqual(len(mail.outbox), 0)

@@ -5,6 +5,7 @@ import logoWhite from '../assets/vividspace-logo-white.png';
 import { useAuth } from '../context/AuthContext';
 import { MS, TONES, useVW, buildCalendar, fmtDate, apiError, safeUrl, todayIso } from '../lib/ms';
 import { Reveal, RevealCard, CountUp } from '../lib/motion';
+import { googleEnabled, initGoogleIdentity } from '../lib/google';
 import {
   getSite, getPublicPackages, getCategories, getPublicSpaces, getFaqs,
   getAvailability, createBooking, createOrder, submitTour, submitCustomization, getOverview, getBookings, cancelBooking,
@@ -1309,9 +1310,126 @@ function CustomizeModal({ offices, onClose }) {
   );
 }
 
+/* Google's four-colour "G", inlined so it needs no network request. */
+const GoogleMark = ({ size = 18 }) => (
+  <svg width={size} height={size} viewBox="0 0 48 48" aria-hidden="true" style={{ display: 'block', flex: '0 0 auto' }}>
+    <path fill="#4285F4" d="M45.12 24.5c0-1.56-.14-3.06-.4-4.5H24v8.51h11.84c-.51 2.75-2.06 5.08-4.39 6.64v5.52h7.11c4.16-3.83 6.56-9.47 6.56-16.17z" />
+    <path fill="#34A853" d="M24 46c5.94 0 10.92-1.97 14.56-5.33l-7.11-5.52c-1.97 1.32-4.49 2.1-7.45 2.1-5.73 0-10.58-3.87-12.31-9.07H4.34v5.7A21.99 21.99 0 0 0 24 46z" />
+    <path fill="#FBBC05" d="M11.69 28.18a13.2 13.2 0 0 1 0-8.36v-5.7H4.34a22 22 0 0 0 0 19.76l7.35-5.7z" />
+    <path fill="#EA4335" d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z" />
+  </svg>
+);
+
+/* ---------------- Google sign-in button ----------------
+   GIS renders its own button inside a closed shadow root, so it can't be
+   styled to match the site. Instead we draw our own button and lay the real
+   GIS one on top at zero opacity — clicks and keyboard activation land on
+   Google's button, which is the only way to get a token without moving to the
+   OAuth *code* flow (that one needs the client secret on the backend).
+   Renders nothing at all when VITE_GOOGLE_CLIENT_ID is unset. */
+function GoogleSignInButton({ onCredential, onError, label = 'Continue with Google' }) {
+  const overlay = useRef(null);
+  const shell = useRef(null);
+  const [ready, setReady] = useState(false);
+  const [hover, setHover] = useState(false);
+  // Held in a ref so the effect doesn't re-run (and re-render the button) every
+  // time the parent re-renders with fresh callback identities.
+  const handlers = useRef({ onCredential, onError });
+  handlers.current = { onCredential, onError };
+
+  useEffect(() => {
+    if (!googleEnabled()) return undefined;
+    let alive = true;
+    let disconnect = null;
+    // GIS needs an explicit pixel width (max 400) — match the real shell so the
+    // invisible hit area covers our button exactly.
+    const draw = () => {
+      if (!alive || !overlay.current || !shell.current) return;
+      const width = Math.min(400, Math.max(200, Math.round(shell.current.offsetWidth) || 320));
+      overlay.current.innerHTML = '';
+      window.google.accounts.id.renderButton(overlay.current, {
+        type: 'standard', theme: 'outline', size: 'large', shape: 'pill',
+        text: 'continue_with', logo_alignment: 'center', width,
+      });
+      setReady(true);
+    };
+
+    initGoogleIdentity((credential) => handlers.current.onCredential(credential))
+      .then(() => {
+        draw();
+        // The modal animates in, so the shell's final width isn't known on the
+        // first paint — redraw whenever it settles.
+        if (!alive || !shell.current || typeof ResizeObserver === 'undefined') return;
+        const ro = new ResizeObserver(draw);
+        ro.observe(shell.current);
+        disconnect = () => ro.disconnect();
+      })
+      .catch((ex) => { if (alive) handlers.current.onError?.(ex); });
+
+    return () => { alive = false; disconnect?.(); };
+  }, []);
+
+  if (!googleEnabled()) return null;
+  return (
+    <div
+      ref={shell}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        position: 'relative', width: '100%', height: 48,
+        // Stay invisible until Google's button is mounted behind it, so a
+        // blocked script leaves no dead control on the form.
+        opacity: ready ? 1 : 0,
+        transition: 'opacity 160ms ease',
+        pointerEvents: ready ? 'auto' : 'none',
+      }}
+    >
+      {/* The visible button — purely presentational; the overlay takes the click. */}
+      <div
+        aria-hidden="true"
+        style={{
+          position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
+          justifyContent: 'center', gap: 10,
+          borderRadius: 9999, border: `1px solid ${hover ? MS.faint : MS.line}`,
+          background: MS.card, color: MS.ink,
+          fontFamily: MS.sans, fontSize: 15, fontWeight: 600, letterSpacing: '.01em',
+          boxShadow: hover ? '0 6px 18px rgba(20,18,16,0.10)' : '0 1px 2px rgba(20,18,16,0.05)',
+          transform: hover ? 'translateY(-1px)' : 'none',
+          transition: 'box-shadow 180ms ease, transform 180ms ease, border-color 180ms ease',
+        }}
+      >
+        <GoogleMark />
+        <span>{label}</span>
+      </div>
+      {/* Google's real button: transparent, on top, and the actual click target.
+          Kept in the tab order so keyboard activation still works. */}
+      <div
+        ref={overlay}
+        style={{
+          position: 'absolute', inset: 0, opacity: 0,
+          display: 'flex', justifyContent: 'center', alignItems: 'center',
+          colorScheme: 'light',
+        }}
+      />
+    </div>
+  );
+}
+
+/* A hairline "or" divider between social and password sign-in. */
+function OrDivider() {
+  if (!googleEnabled()) return null;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '2px 0' }}>
+      <span style={{ flex: 1, height: 1, background: MS.line }} />
+      <span style={{ fontSize: 12.5, color: MS.muted, letterSpacing: '.06em', textTransform: 'uppercase' }}>or</span>
+      <span style={{ flex: 1, height: 1, background: MS.line }} />
+    </div>
+  );
+}
+
 /* ---------------- Auth modal (login / register / forgot) ---------------- */
 function AuthModal({ onClose, onAuthed, goDashboard, resetInfo, verifyInfo }) {
-  const { login, register, requestReset, confirmReset, verifyEmail, resendVerification, logout, user, isAuthed } = useAuth();
+  const { login, loginWithGoogle, register, requestReset, confirmReset, verifyEmail, resendVerification, logout, user, isAuthed } = useAuth();
   const [view, setView] = useState(
     resetInfo ? 'reset' : verifyInfo ? 'verifying' : (isAuthed ? 'profile' : 'login'));
   const [email, setEmail] = useState('');
@@ -1325,7 +1443,13 @@ function AuthModal({ onClose, onAuthed, goDashboard, resetInfo, verifyInfo }) {
   const field = (label, value, onChange, type = 'text', placeholder = '') => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
       <label style={{ fontSize: 14, fontWeight: 500 }}>{label}</label>
-      <input value={value} onChange={(e) => { onChange(e.target.value); setErr(''); }} type={type} placeholder={placeholder} style={inputStyle} />
+      <input
+        value={value} onChange={(e) => { onChange(e.target.value); setErr(''); }}
+        type={type} placeholder={placeholder} style={inputStyle}
+        // Mobile keyboards capitalise the first letter by default, which turns
+        // an address into "Jane@..." — accounts are keyed on the lowercase form.
+        {...(label === 'Email' ? { autoCapitalize: 'none', autoCorrect: 'off', spellCheck: false } : {})}
+      />
     </div>
   );
 
@@ -1355,6 +1479,21 @@ function AuthModal({ onClose, onAuthed, goDashboard, resetInfo, verifyInfo }) {
       else setErr(msg);
     } finally { setBusy(false); }
   };
+  // Google returns a verified identity, so this signs in immediately — there's
+  // no email to confirm and no separate "register" step to route through.
+  const doGoogle = useCallback(async (credential) => {
+    setErr('');
+    setBusy(true);
+    try { const u = await loginWithGoogle(credential); onAuthed(u); }
+    catch (ex) { setErr(apiError(ex, 'Google sign-in failed. Please try again.')); }
+    finally { setBusy(false); }
+  }, [loginWithGoogle, onAuthed]);
+  const onGoogleError = useCallback(() => {
+    // Script blocked (ad-blocker, offline, CSP). The password form still works,
+    // so this stays a quiet degradation rather than a modal-filling error.
+    setErr('');
+  }, []);
+
   const doRegister = async (e) => {
     e.preventDefault();
     if (!name.trim() || !email.trim() || !pass.trim()) { setErr('Please fill in every field.'); return; }
@@ -1410,6 +1549,8 @@ function AuthModal({ onClose, onAuthed, goDashboard, resetInfo, verifyInfo }) {
         {view === 'login' && (
           <form onSubmit={doLogin} style={{ display: 'flex', flexDirection: 'column', gap: 15 }}>
             {heading('Welcome back')}
+            <GoogleSignInButton onCredential={doGoogle} onError={onGoogleError} label="Sign in with Google" />
+            <OrDivider />
             {field('Email', email, setEmail, 'text', 'you@company.com')}
             {field('Password', pass, setPass, 'password', '••••••••')}
             <div style={{ alignSelf: 'flex-end' }}>{linkBtn('Forgot password?', go('forgot'))}</div>
@@ -1420,6 +1561,8 @@ function AuthModal({ onClose, onAuthed, goDashboard, resetInfo, verifyInfo }) {
         {view === 'register' && (
           <form onSubmit={doRegister} style={{ display: 'flex', flexDirection: 'column', gap: 15 }}>
             {heading('Create your account')}
+            <GoogleSignInButton onCredential={doGoogle} onError={onGoogleError} label="Sign up with Google" />
+            <OrDivider />
             {field('Full name', name, setName, 'text', 'Alex Rivera')}
             {field('Email', email, setEmail, 'text', 'you@company.com')}
             {field('Password', pass, setPass, 'password', 'At least 8 characters')}

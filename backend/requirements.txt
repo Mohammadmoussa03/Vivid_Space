@@ -1,6 +1,11 @@
 Django==4.2.30
 djangorestframework==3.16.1
 djangorestframework-simplejwt==5.5.1
+# Social sign-in: verify the provider's RS256 ID token against its JWKS.
+# PyJWT arrives via simplejwt but is pinned here because we use it directly;
+# cryptography supplies the RSA backend PyJWT needs for RS256.
+PyJWT==2.13.0
+cryptography==49.0.0
 psycopg[binary]==3.2.13
 django-cors-headers==4.9.0
 python-dotenv==1.2.1
