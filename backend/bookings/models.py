@@ -683,6 +683,9 @@ class SiteContent(models.Model):
     about_body = models.TextField(default=_ABOUT_BODY, blank=True)
     # Optional short bullets shown beside the body, e.g. ["Founded 2021", "3 locations"].
     about_points = models.JSONField(default=list, blank=True)
+    # Client logos shown as a marquee under the About us section:
+    # [{ "name": "Acme", "logo": "/media/gallery/acme.png" }, ...]
+    about_clients = models.JSONField(default=list, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

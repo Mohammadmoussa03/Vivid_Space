@@ -163,6 +163,7 @@ class SiteConfigView(APIView):
                 'title': content.about_title,
                 'body': content.about_body,
                 'points': content.about_points,
+                'clients': content.about_clients,
             },
             'contact': {
                 'email': s.contact_email,

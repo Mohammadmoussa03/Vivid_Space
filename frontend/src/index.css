@@ -107,6 +107,21 @@ button, input, textarea, select { font-family: var(--font-sans); }
 .adm-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
 .adm-scroll::-webkit-scrollbar-thumb { background: #DED8D0; border-radius: 9999px; }
 
+/* Client-logo marquee (About us). Two identical tracks sit side by side and both
+   slide left by exactly one track width, so the loop has no visible seam. */
+.ms-marquee { display: flex; overflow: hidden; -webkit-mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent); mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent); }
+.ms-marquee-track { display: flex; align-items: center; flex: 0 0 auto; will-change: transform; animation: ms-marquee 38s linear infinite; }
+.ms-marquee:hover .ms-marquee-track { animation-play-state: paused; }
+@keyframes ms-marquee { from { transform: translateX(0); } to { transform: translateX(-100%); } }
+/* Logos render exactly as uploaded — no filter, blend or opacity treatment. */
+.ms-logo { transition: transform 260ms ease-out; }
+.ms-logo:hover { transform: scale(1.05); }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  /* Don't let the blanket rule snap the marquee to its end frame — stop it and
+     let the row scroll by hand instead. */
+  .ms-marquee-track { animation: none !important; }
+  .ms-marquee { overflow-x: auto; -webkit-mask-image: none; mask-image: none; }
+  .ms-marquee-track + .ms-marquee-track { display: none; }
 }

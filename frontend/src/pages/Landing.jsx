@@ -159,6 +159,8 @@ export default function Landing() {
   const about = site?.about || {};
   const aboutParas = String(about.body || '').split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
   const aboutPoints = (about.points || []).filter(Boolean);
+  // Client logos for the marquee — a row is only usable if it has an image.
+  const aboutClients = (about.clients || []).filter((c) => c && c.logo);
   const stats = HERO_STATS;
   const footer = { note: FOOTER_NOTE, columns: FOOTER_COLS };
 
@@ -492,8 +494,10 @@ export default function Landing() {
       </section>
 
       {/* ===== ABOUT US ===== */}
-      {(about.title || aboutParas.length > 0) && (
-        <section id="about" ref={aboutRef} style={{ background: MS.bg, padding: sectionPad, scrollMarginTop: 84 }}>
+      {(about.title || aboutParas.length > 0 || aboutClients.length > 0) && (
+        // The logo strip is short, so it needs less breathing room under it than a
+        // full text block would — otherwise the section ends on a dead gap.
+        <section id="about" ref={aboutRef} style={{ background: MS.bg, padding: sectionPad, ...(aboutClients.length > 0 && { paddingBottom: 'clamp(44px,6vw,76px)' }), scrollMarginTop: 84 }}>
           <div style={{ maxWidth: 1180, margin: '0 auto', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 'clamp(28px,5vw,64px)', alignItems: 'start' }}>
             <Reveal>
               {about.eyebrow && <p style={eyebrow}>{about.eyebrow}</p>}
@@ -515,6 +519,14 @@ export default function Landing() {
               )}
             </Reveal>
           </div>
+          {aboutClients.length > 0 && (
+            <Reveal style={{ maxWidth: 1180, margin: 'clamp(38px,5vw,60px) auto 0' }}>
+              <p style={{ textAlign: 'center', color: MS.faint, fontSize: 12, fontWeight: 600, letterSpacing: '0.16em', textTransform: 'uppercase', margin: '0 0 22px' }}>
+                Trusted by the teams we work with
+              </p>
+              <LogoMarquee items={aboutClients} />
+            </Reveal>
+          )}
         </section>
       )}
 
@@ -897,6 +909,31 @@ function SpaceStat({ label, value }) {
 }
 
 const overlay = (dark = 0.62) => ({ position: 'fixed', inset: 0, zIndex: 100, background: `rgba(20,18,16,${dark})`, backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 'clamp(14px,4vw,40px)', animation: 'ms-fade 220ms ease-out both' });
+/* ---------------- Client-logo carousel (About us) ---------------- */
+// Two identical tracks scroll left together (see `.ms-marquee` in index.css). A short
+// client list is repeated until one track is wide enough to fill the viewport, so a
+// three-logo carousel doesn't scroll a gap across the screen.
+function LogoMarquee({ items }) {
+  const reps = Math.max(1, Math.ceil(8 / items.length));
+  const track = Array.from({ length: reps }, () => items).flat();
+  const duration = `${Math.max(20, track.length * 4)}s`;
+  const row = (copy) => (
+    <div className="ms-marquee-track" style={{ animationDuration: duration }} aria-hidden={copy === 1 ? 'true' : undefined}>
+      {track.map((c, i) => (
+        // Every cell is the same fixed box: uploads vary wildly in aspect ratio, and
+        // sizing cells to their image would space the row unevenly. The fixed height
+        // also reserves the row before the images load — a zero-height marquee never
+        // scrolls into view, so its lazy images would never load.
+        <span key={`${copy}-${i}`} style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 'clamp(150px,17vw,210px)', height: 84 }}>
+          <img className="ms-logo" src={safeUrl(c.logo)} alt={c.name || ''} loading="lazy"
+            style={{ display: 'block', maxWidth: '100%', maxHeight: '100%', width: 'auto', height: 'auto', objectFit: 'contain' }} />
+        </span>
+      ))}
+    </div>
+  );
+  return <div className="ms-marquee">{row(0)}{row(1)}</div>;
+}
+
 /* ---------------- Tour form (POST /tours/) ---------------- */
 function TourForm() {
   const [f, setF] = useState({ first: '', last: '', email: '', phone: '', promo: '' });
@@ -1128,6 +1165,7 @@ function CustomizeModal({ offices, onClose }) {
     if (!f.name.trim()) er.name = 'Required';
     if (!f.email.trim()) er.email = 'Required';
     else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(f.email)) er.email = 'Enter a valid email';
+    if (!f.phone.trim()) er.phone = 'Required';
     if (totalDays === 0) er.days = 'Add at least one day for one office';
     if (Object.keys(er).length) { setErr(er); return; }
     // Group the assigned days back into one line per office, carrying its time of day.
@@ -1287,8 +1325,9 @@ function CustomizeModal({ offices, onClose }) {
             </div>
           </div>
           <div>
-            <label style={label}>Phone <span style={{ color: '#A9A39C', fontWeight: 400 }}>(optional)</span></label>
-            <input value={f.phone} onChange={set('phone')} placeholder="+1 555 000 1234" className="ms-input" style={inputStyle} />
+            <label style={label}>Phone</label>
+            <input value={f.phone} onChange={set('phone')} placeholder="+1 555 000 1234" className="ms-input" style={{ ...inputStyle, border: `1px solid ${bd('phone')}` }} />
+            {err.phone && <span style={{ fontSize: 12.5, color: MS.red }}>{err.phone}</span>}
           </div>
           <div>
             <label style={label}>Tell us more <span style={{ color: '#A9A39C', fontWeight: 400 }}>(optional)</span></label>

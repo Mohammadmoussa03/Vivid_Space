@@ -322,6 +322,7 @@ class SiteContentSerializer(serializers.ModelSerializer):
                   'gallery', 'services', 'testimonials', 'intro_text', 'stats', 'solutions',
                   'hero_cards', 'footer', 'headings', 'nav_menus',
                   'about_eyebrow', 'about_title', 'about_body', 'about_points',
+                  'about_clients',
                   'updated_at')
         read_only_fields = ('updated_at',)
 

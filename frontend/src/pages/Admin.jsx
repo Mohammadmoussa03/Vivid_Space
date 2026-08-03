@@ -1282,6 +1282,7 @@ function Content() {
     { title: 'Hero', desc: 'Headline, subtext and background image/video', edit: () => setModal('hero') },
     { title: 'Intro statement', desc: 'The large statement under the hero', edit: () => setModal('intro') },
     { title: 'About us', desc: 'The About us section — heading, story and highlights', edit: () => setModal('about') },
+    { title: 'Client logos', desc: 'The logo carousel under About us — companies you work with', edit: () => setModal('clients') },
     { title: 'Members', desc: 'Testimonials — quotes, names and photos', edit: () => setModal('testimonials') },
     { title: 'Contact information', desc: 'Email, phone, address and map', edit: () => setModal('contact') },
     { title: 'Business hours', desc: 'Opening times and tour notifications', edit: () => setModal('hours') },
@@ -1351,6 +1352,9 @@ function Content() {
       {modal === 'testimonials' && (
         <TestimonialsModal initial={content?.testimonials || []} onSave={(list) => saveContent({ testimonials: list })} onClose={() => setModal(null)} />
       )}
+      {modal === 'clients' && (
+        <ClientLogosModal initial={content?.about_clients || []} onSave={(list) => saveContent({ about_clients: list })} onClose={() => setModal(null)} />
+      )}
     </div>
   );
 }
@@ -1410,6 +1414,75 @@ function TestimonialsModal({ initial, onSave, onClose }) {
           ))}
         </div>
         <button onClick={add} style={{ ...smallBtn(), marginTop: 14 }}>+ Add member</button>
+        <button onClick={save} disabled={busy} style={{ width: '100%', marginTop: 18, background: MS.accent, color: '#fff', border: 'none', fontSize: 15, fontWeight: 600, padding: 13, borderRadius: 9999, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.7 : 1 }}>{busy ? 'Saving…' : 'Save'}</button>
+      </div>
+    </div>
+  );
+}
+
+// Editor for the client-logo carousel under "About us" (name + logo per row).
+function ClientLogosModal({ initial, onSave, onClose }) {
+  const [rows, setRows] = useState(() => (initial.length ? initial.map((c) => ({ ...c })) : [{ name: '', logo: '' }]));
+  const [busy, setBusy] = useState(false);
+  const [uploading, setUploading] = useState(-1);
+  const [err, setErr] = useState('');
+  const set = (i, k, v) => setRows((s) => s.map((r, j) => (j === i ? { ...r, [k]: v } : r)));
+  const add = () => setRows((s) => [...s, { name: '', logo: '' }]);
+  const remove = (i) => setRows((s) => s.filter((_, j) => j !== i));
+  const move = (i, d) => setRows((s) => {
+    const j = i + d;
+    if (j < 0 || j >= s.length) return s;
+    const next = [...s];
+    [next[i], next[j]] = [next[j], next[i]];
+    return next;
+  });
+  const upload = async (i, file) => {
+    if (!file) return;
+    setUploading(i); setErr('');
+    try { const up = await adminUploadImage(file); set(i, 'logo', up.url); }
+    catch (e) { setErr(apiError(e, 'Upload failed.')); }
+    finally { setUploading(-1); }
+  };
+  const save = async () => {
+    setBusy(true); setErr('');
+    // A row without a logo has nothing to show in the carousel — drop it.
+    const clean = rows.filter((r) => (r.logo || '').trim()).map((r) => ({ name: (r.name || '').trim(), logo: r.logo.trim() }));
+    try { await onSave(clean); onClose(); }
+    catch (e) { setErr(apiError(e, 'Could not save.')); setBusy(false); }
+  };
+  const inp = { background: '#fff', border: `1px solid ${MS.line}`, borderRadius: 10, padding: '10px 12px', fontFamily: MS.sans, fontSize: 14.5, color: MS.ink, outline: 'none', width: '100%' };
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(20,18,16,0.62)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 'clamp(14px,4vw,40px)', animation: 'ms-fade 200ms ease-out both' }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: MS.panel, width: 'min(620px, 100%)', maxHeight: '90vh', overflowY: 'auto', borderRadius: 20, padding: 'clamp(24px,4vw,32px)', boxShadow: '0 30px 80px rgba(20,18,16,0.32)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <h3 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 22, margin: 0 }}>Client logos</h3>
+          <button onClick={onClose} aria-label="Close" style={{ width: 36, height: 36, borderRadius: 9999, border: `1px solid ${MS.line}`, background: '#fff', color: MS.ink, fontSize: 16, cursor: 'pointer' }}>✕</button>
+        </div>
+        <p style={{ fontSize: 13, color: MS.faint, margin: '0 0 18px' }}>Shown as a scrolling carousel under the About us section. Transparent PNG or SVG works best.</p>
+        {err && <p style={{ background: 'rgba(168,90,74,0.12)', color: MS.red, fontSize: 13, fontWeight: 500, padding: '10px 14px', borderRadius: 10, margin: '0 0 16px' }}>{err}</p>}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ border: `1px solid ${MS.line}`, borderRadius: 14, padding: 16, display: 'flex', flexDirection: 'column', gap: 10, background: '#fff' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: MS.faint, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Client {i + 1}</span>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={() => move(i, -1)} disabled={i === 0} style={{ ...smallBtn(), opacity: i === 0 ? 0.4 : 1 }}>↑</button>
+                  <button onClick={() => move(i, 1)} disabled={i === rows.length - 1} style={{ ...smallBtn(), opacity: i === rows.length - 1 ? 0.4 : 1 }}>↓</button>
+                  <button onClick={() => remove(i)} style={smallBtn('danger')}>Remove</button>
+                </div>
+              </div>
+              <input value={r.name || ''} onChange={(e) => set(i, 'name', e.target.value)} placeholder="Company name (used as the image alt text)" style={inp} />
+              <input value={r.logo || ''} onChange={(e) => set(i, 'logo', e.target.value)} placeholder="Logo URL (or upload below)" style={inp} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <input type="file" accept="image/*" onChange={(e) => upload(i, e.target.files?.[0])} style={{ fontSize: 13 }} />
+                {uploading === i && <span style={{ fontSize: 12, color: MS.faint }}>Uploading…</span>}
+                {r.logo && <img src={r.logo} alt="" style={{ width: 96, height: 40, objectFit: 'contain', marginLeft: 'auto' }} />}
+              </div>
+            </div>
+          ))}
+        </div>
+        <button onClick={add} style={{ ...smallBtn(), marginTop: 14 }}>+ Add client</button>
         <button onClick={save} disabled={busy} style={{ width: '100%', marginTop: 18, background: MS.accent, color: '#fff', border: 'none', fontSize: 15, fontWeight: 600, padding: 13, borderRadius: 9999, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.7 : 1 }}>{busy ? 'Saving…' : 'Save'}</button>
       </div>
     </div>

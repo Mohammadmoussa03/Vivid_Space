@@ -511,7 +511,7 @@ class CustomizationRequestSerializer(serializers.Serializer):
 
     name = serializers.CharField(max_length=120)
     email = serializers.EmailField()
-    phone = serializers.CharField(max_length=40, required=False, allow_blank=True)
+    phone = serializers.CharField(max_length=40)
     # A bespoke package mixes any number of offices, each with its own set of days.
     items = CustomizationItemSerializer(many=True, allow_empty=False, max_length=20)
     details = serializers.CharField(required=False, allow_blank=True, max_length=2000)
