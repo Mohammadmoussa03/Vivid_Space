@@ -25,6 +25,9 @@ class AdminUserSerializer(serializers.ModelSerializer):
     plan = serializers.SerializerMethodField()
     schedule_change_requested = serializers.SerializerMethodField()
     schedule_change_days = serializers.SerializerMethodField()
+    room_hours_left = serializers.SerializerMethodField()
+    room_hours_used = serializers.SerializerMethodField()
+    effective_hours = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -32,6 +35,7 @@ class AdminUserSerializer(serializers.ModelSerializer):
             'id', 'uuid', 'email', 'first_name', 'last_name', 'company', 'full_name',
             'role', 'is_approved', 'is_active', 'date_joined', 'plan',
             'schedule_change_requested', 'schedule_change_days',
+            'room_hours_left', 'room_hours_used', 'effective_hours',
         )
         read_only_fields = fields
 
@@ -49,6 +53,20 @@ class AdminUserSerializer(serializers.ModelSerializer):
             return 0
         return sum(len(c.get('dates') or []) for c in (membership.pending_components or [])
                    if isinstance(c, dict) and not c.get('lifetime'))
+
+    # Free meeting-room hours for the current month. `room_hours_left` reads
+    # through Membership.sync_period(), so a month rollover zeroes usage lazily.
+    def get_room_hours_left(self, obj):
+        membership = getattr(obj, 'membership', None)
+        return membership.room_hours_left if membership else None
+
+    def get_room_hours_used(self, obj):
+        membership = getattr(obj, 'membership', None)
+        return float(membership.room_hours_used) if membership else None
+
+    def get_effective_hours(self, obj):
+        membership = getattr(obj, 'membership', None)
+        return membership.effective_hours if membership else None
 
 
 class ClientSerializer(serializers.ModelSerializer):

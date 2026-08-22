@@ -246,6 +246,24 @@ const userStatus = (u) => {
   return u.is_approved ? 'Active' : 'Pending';
 };
 const USER_TONE = { Active: 'green', Pending: 'amber', Deactivated: 'neutral', Rejected: 'red' };
+/* Free meeting-room hours left this month (members on a plan that grants them).
+   `null` fields mean the user has no membership; 0 total means the plan has no
+   free hours — both render as a dash rather than a misleading "0 h left". */
+function roomHours(u) {
+  const total = Number(u.effective_hours || 0);
+  if (u.room_hours_left == null || total <= 0) return <span style={{ fontSize: 14, color: MS.faint }}>—</span>;
+  const left = Number(u.room_hours_left || 0);
+  const tone = left <= 0 ? TONES.red : (left <= total / 4 ? TONES.amber : TONES.green);
+  return (
+    <span title={`Free meeting-room hours included in this member's package: ${fmtHrs(left)} of ${fmtHrs(total)} h still available this month.`}
+      style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+      {pill(tone.bg, tone.color, `${fmtHrs(left)} / ${fmtHrs(total)} h left`)}
+      <span style={{ fontSize: 11.5, color: MS.faint }}>{fmtHrs(Number(u.room_hours_used || 0))} h used this month</span>
+    </span>
+  );
+}
+const fmtHrs = (n) => (Number.isInteger(n) ? String(n) : String(Math.round(n * 10) / 10));
+
 function Users({ query }) {
   const [rows, reload] = useData(() => adminUsers());
   const [filter, setFilter] = useState('All');
@@ -264,7 +282,7 @@ function Users({ query }) {
   });
   // One fixed template shared by the header and every row so columns line up
   // regardless of how many action buttons a row shows (fixed-width Actions col).
-  const cols = 'minmax(180px,2fr) minmax(110px,1.2fr) 110px 110px 250px';
+  const cols = 'minmax(180px,2fr) minmax(110px,1.2fr) 165px 110px 110px 250px';
 
   return (
     <>
@@ -298,9 +316,9 @@ function Users({ query }) {
         {pendingSchedule.length > 0 && <FilterPill label={`Schedule changes (${pendingSchedule.length})`} active={filter === 'schedule'} onClick={() => setFilter('schedule')} />}
       </div>
       <div style={{ ...card, overflowX: 'auto' }}>
-       <div style={{ minWidth: 760 }}>
+       <div style={{ minWidth: 925 }}>
         <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 16, padding: '14px 22px', borderBottom: `1px solid ${MS.line}`, ...th }}>
-          <span>Member</span><span>Plan</span><span>Status</span><span>Joined</span><span style={{ textAlign: 'right' }}>Actions</span>
+          <span>Member</span><span>Plan</span><span>Meeting-room hours</span><span>Status</span><span>Joined</span><span style={{ textAlign: 'right' }}>Actions</span>
         </div>
         {filtered.length === 0 && <div style={{ padding: 30, textAlign: 'center', color: MS.faint }}>No matching users.</div>}
         {filtered.map((u) => {
@@ -319,6 +337,7 @@ function Users({ query }) {
                 {u.plan || '—'}
                 {u.schedule_change_requested && <span style={{ marginLeft: 8, display: 'inline-block' }}>{pill(TONES.lilac.bg, TONES.lilac.color, `Schedule change${u.schedule_change_days ? ` · ${u.schedule_change_days}d` : ''}`)}</span>}
               </span>
+              <span style={{ minWidth: 0 }}>{roomHours(u)}</span>
               <span>{pill(tone.bg, tone.color, status)}</span>
               <span style={{ fontSize: 14, color: MS.muted }}>{new Date(u.date_joined).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
               <div style={{ display: 'flex', gap: 7, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
@@ -449,6 +468,7 @@ function CustomizeModal({ user, onClose }) {
   const [monthOffset, setMonthOffset] = useState(0);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const [hours, setHours] = useState(null);   // {used, left, total} — this month's free-hour balance
 
   useEffect(() => {
     Promise.all([adminPackages(true), adminUserMembership(user.id)])
@@ -471,6 +491,7 @@ function CustomizeModal({ user, onClose }) {
         setAssign(a);
         setLifetime(life);
         setActive(order[0] ?? '');
+        if (m) setHours({ used: Number(m.room_hours_used || 0), left: Number(m.room_hours_left || 0), total: Number(m.effective_hours || 0) });
         setForm({
           custom_plan_name: m?.custom_plan_name ?? '',
           status: m?.status ?? 'active',
@@ -672,6 +693,11 @@ function CustomizeModal({ user, onClose }) {
               {label('Monthly meeting-room hours (blank = plan default)')}
               <input type="number" min="0" value={form.monthly_hours} onChange={(e) => set('monthly_hours', e.target.value)}
                 placeholder={basePlan ? `Plan default: ${basePlan.room_hours}` : ''} style={inp} />
+              {hours && hours.total > 0 && (
+                <p style={{ fontSize: 12.5, color: MS.muted, margin: 0 }}>
+                  Free meeting-room hours this month: <strong style={{ fontWeight: 600 }}>{fmtHrs(hours.left)} h left</strong> of {fmtHrs(hours.total)} h · {fmtHrs(hours.used)} h used
+                </p>
+              )}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
