@@ -109,32 +109,39 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # Deploy exactly this commit, not just "latest main" — if two pushes
-          # land close together, each run ships its own SHA deterministically.
-          command_id=$(aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name AWS-RunShellScript \
-            --comment "GitHub Actions deploy ${SHA::7}" \
-            --timeout-seconds 600 \
-            --parameters commands="[\"set -euo pipefail\",\"cd /opt/vivid/app\",\"sudo -u vivid_app git fetch origin main\",\"sudo -u vivid_app git checkout --detach $SHA || sudo -u vivid_app git checkout main\",\"sudo BRANCH=main bash /opt/vivid/app/deploy.sh\"]" \
-            --query 'Command.CommandId' --output text)
+          # deploy.sh is copied to /tmp before it runs: it pulls a new version
+          # of *itself*, and bash reads a script incrementally — mutating the
+          # file mid-run makes it resume at a shifted byte offset.
+          # SSM commands run as root; git calls use vivid_app so file ownership
+          # (and git's dubious-ownership check on /opt/vivid/app) stay right.
+          cat > /tmp/params.json <<JSON
+          {
+            "commands": [
+              "set -euo pipefail",
+              "sudo -u vivid_app git -C /opt/vivid/app fetch origin main",
+              "sudo -u vivid_app git -C /opt/vivid/app pull --ff-only origin main",
+              "echo \"deploying \$(sudo -u vivid_app git -C /opt/vivid/app rev-parse --short HEAD) (workflow triggered by ${SHA:0:7})\"",
+              "install -m 0755 /opt/vivid/app/deploy.sh /tmp/vivid-deploy.sh",
+              "BRANCH=main bash /tmp/vivid-deploy.sh"
+            ]
+          }
+          JSON
+          command_id=$(aws ssm send-command             --instance-ids "$INSTANCE_ID"             --document-name AWS-RunShellScript             --comment "GitHub Actions deploy ${SHA:0:7}"             --timeout-seconds 900             --parameters file:///tmp/params.json             --query 'Command.CommandId' --output text)
           echo "SSM command: $command_id"
 
           # Poll to completion, then surface the script's own output either way.
-          for _ in $(seq 1 120); do
-            status=$(aws ssm get-command-invocation --command-id "$command_id" \
-              --instance-id "$INSTANCE_ID" --query Status --output text 2>/dev/null || echo Pending)
+          status=Pending
+          for _ in $(seq 1 180); do
+            status=$(aws ssm get-command-invocation --command-id "$command_id"               --instance-id "$INSTANCE_ID" --query Status --output text 2>/dev/null || echo Pending)
             case "$status" in
               Success|Failed|Cancelled|TimedOut) break ;;
             esac
             sleep 5
           done
 
-          aws ssm get-command-invocation --command-id "$command_id" \
-            --instance-id "$INSTANCE_ID" --query StandardOutputContent --output text || true
+          aws ssm get-command-invocation --command-id "$command_id"             --instance-id "$INSTANCE_ID" --query StandardOutputContent --output text || true
           echo "--- stderr ---"
-          aws ssm get-command-invocation --command-id "$command_id" \
-            --instance-id "$INSTANCE_ID" --query StandardErrorContent --output text || true
+          aws ssm get-command-invocation --command-id "$command_id"             --instance-id "$INSTANCE_ID" --query StandardErrorContent --output text || true
 
           echo "Final status: $status"
           [ "$status" = "Success" ]
