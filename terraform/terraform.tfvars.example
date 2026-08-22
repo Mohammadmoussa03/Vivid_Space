@@ -33,3 +33,6 @@ manage_ses         = false
 default_from_email = "Vivid Space <no-reply@example.com>"
 # ses_smtp_username = ""   # from SES > SMTP settings (or fill .env on the box later)
 # ses_smtp_password = ""
+
+# owner/repo allowed to deploy via GitHub Actions OIDC ("" disables the role)
+github_repository = ""
