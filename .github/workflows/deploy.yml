@@ -1,0 +1,147 @@
+# CI/CD: test every push, then deploy main to the live EC2 box.
+#
+# The deploy step never opens an SSH port — it asks AWS Systems Manager to run
+# `deploy.sh` on the instance, which pulls this commit, rebuilds, and swaps the
+# new build in with a graceful gunicorn reload (no dropped requests).
+#
+# Auth is GitHub OIDC: Actions assumes an IAM role scoped to this repo, so
+# there are no long-lived AWS keys stored in GitHub. The role ARN and instance
+# id come from repository *variables* (Settings → Secrets and variables →
+# Actions → Variables), not secrets — neither value is sensitive:
+#   AWS_ROLE_ARN   e.g. arn:aws:iam::<account>:role/vivid-space-github-deploy
+#   AWS_REGION     e.g. eu-central-1
+#   INSTANCE_ID    e.g. i-0abc...
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:   # lets you re-run a deploy by hand from the Actions tab
+
+concurrency:
+  # Never let two deploys touch the box at once; queue instead of racing.
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: vivid_space
+          POSTGRES_USER: vivid
+          POSTGRES_PASSWORD: vivid_ci_pw
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+      - name: Backend tests
+        working-directory: backend
+        env:
+          POSTGRES_DB: vivid_space
+          POSTGRES_USER: vivid
+          POSTGRES_PASSWORD: vivid_ci_pw
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: '5432'
+          DJANGO_SECRET_KEY: ci-only-not-a-real-secret
+        run: python manage.py test --settings=config.test_settings
+      - name: Check for missing migrations
+        working-directory: backend
+        env:
+          POSTGRES_DB: vivid_space
+          POSTGRES_USER: vivid
+          POSTGRES_PASSWORD: vivid_ci_pw
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: '5432'
+          DJANGO_SECRET_KEY: ci-only-not-a-real-secret
+        run: python manage.py makemigrations --check --dry-run --settings=config.test_settings
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+  deploy:
+    name: Deploy to production
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: production   # add required reviewers here to gate deploys
+    permissions:
+      id-token: write   # required to mint the OIDC token
+      contents: read
+    steps:
+      - name: Configure AWS credentials (OIDC — no stored keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Run deploy.sh on the instance via SSM
+        env:
+          INSTANCE_ID: ${{ vars.INSTANCE_ID }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Deploy exactly this commit, not just "latest main" — if two pushes
+          # land close together, each run ships its own SHA deterministically.
+          command_id=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "GitHub Actions deploy ${SHA::7}" \
+            --timeout-seconds 600 \
+            --parameters commands="[\"set -euo pipefail\",\"cd /opt/vivid/app\",\"sudo -u vivid_app git fetch origin main\",\"sudo -u vivid_app git checkout --detach $SHA || sudo -u vivid_app git checkout main\",\"sudo BRANCH=main bash /opt/vivid/app/deploy.sh\"]" \
+            --query 'Command.CommandId' --output text)
+          echo "SSM command: $command_id"
+
+          # Poll to completion, then surface the script's own output either way.
+          for _ in $(seq 1 120); do
+            status=$(aws ssm get-command-invocation --command-id "$command_id" \
+              --instance-id "$INSTANCE_ID" --query Status --output text 2>/dev/null || echo Pending)
+            case "$status" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 5
+          done
+
+          aws ssm get-command-invocation --command-id "$command_id" \
+            --instance-id "$INSTANCE_ID" --query StandardOutputContent --output text || true
+          echo "--- stderr ---"
+          aws ssm get-command-invocation --command-id "$command_id" \
+            --instance-id "$INSTANCE_ID" --query StandardErrorContent --output text || true
+
+          echo "Final status: $status"
+          [ "$status" = "Success" ]
+
+      - name: Verify the site is serving
+        run: |
+          set -euo pipefail
+          code=$(curl -s -o /dev/null -w '%{http_code}' https://vividspace.space/api/site/)
+          echo "GET https://vividspace.space/api/site/ -> $code"
+          [ "$code" = "200" ]
