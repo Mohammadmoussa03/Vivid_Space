@@ -63,8 +63,30 @@ Free hours are a **recurring monthly plan allowance**, not accrued/earned:
 - `MembershipPlan.room_hours` = hours/month; `Membership.monthly_hours` = optional per-member admin override. `Membership.effective_hours` resolves override-else-plan.
 - `room_hours_used` + `hours_period` (`YYYY-MM`) track usage; `sync_period()` lazily zeros usage on month rollover (no carryover). Also a `reset_monthly_hours` management command.
 - `room_hours_left = max(0, effective_hours − room_hours_used)`.
-- Consumed only when booking an **hourly** space with `Space.uses_free_hours=True`: `BookingCreateSerializer` validates balance, deducts atomically (`select_for_update`), marks booking `is_free`/`price=None`, and snapshots `Booking.free_hours_used`.
-- Cancel → `_refund_free_hours()` (in `views.py`) returns exactly `free_hours_used` to the balance.
+- Consumed only when booking an **hourly** space: `BookingCreateSerializer` validates balance, deducts atomically (`select_for_update`), marks booking `is_free`/`price=None`, and snapshots `Booking.free_hours_used`.
+- Cancel → `_refund_free_hours()` (in `views.py`) returns exactly `free_hours_used` to the bucket it was taken from.
+
+**Two buckets.** Hours live either in the **shared pool** (bucket `''`, the plan/override
+above, drawn on by every `Space.uses_free_hours=True` space) or in a **per-space grant** —
+`Membership.space_hours` `{"<space id>": hours/month}`, set by ticking rooms in the admin's
+Customize-package modal, with usage in `space_hours_used` (same keys, zeroed by
+`sync_period()` alongside `room_hours_used`).
+- `Membership.free_hours_bucket_for(space)` is **the** resolver: a grant for that space wins,
+  else the shared pool when the space is flagged, else `None` (paid). A granted space is free
+  **regardless of `uses_free_hours`** — the admin ticked that room for that member on purpose.
+- Balances go through `hours_left_in` / `consume_hours` / `refund_hours`, never by touching
+  `room_hours_used` directly. `space_hours_summary` is the display shape; `shared_hours_apply`
+  is False once every flagged space is also granted, so the shared figure is hidden rather
+  than shown next to a per-room card for the same room.
+- The Customize modal only offers rooms that **aren't** flagged `uses_free_hours` — those keep
+  the single "Monthly meeting-room hours" field, so no room is controlled in two places. A
+  grant on a flagged room (from before that rule) is still surfaced, with a Remove action.
+- `Booking.free_hours_bucket` records which bucket a booking charged, so a cancellation
+  refunds that one even if the admin changed the grants in between. Don't re-derive it.
+- Grants are written only by `AdminUserViewSet.set_membership` (`space_hours` in the body),
+  which drops unknown space ids and non-positive hours, and clears the usage rows of any
+  grant that was removed. A `0`-hour grant is dropped rather than stored — it would read as
+  "free room, no allowance" and block the space entirely.
 
 ## Deployment — AWS via Terraform/OpenTofu (`terraform/`, Option A)
 Infra-as-code for `AWS_DEPLOY.md` **Option A** (single EC2 + RDS + S3 + SES) lives in

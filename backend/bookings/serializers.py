@@ -336,18 +336,26 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         if blocked:
             raise serializers.ValidationError({'detail': blocked})
 
-        # Free meeting-room hours: verify the member has enough balance.
-        if space.uses_free_hours and duration == Booking.Duration.HOURLY:
+        # Free hours: verify the balance of whichever allowance covers this
+        # space — a per-space grant from the member's package, else the shared
+        # meeting-room pool.
+        if duration == Booking.Duration.HOURLY:
             membership = Membership.objects.filter(
                 user=self.context['request'].user
             ).select_related('plan').first()
             if membership:
-                membership.sync_period()
-                if membership.room_hours_left < hours:
-                    raise serializers.ValidationError(
-                        {'detail': f'Not enough free meeting-room hours '
-                                   f'({membership.room_hours_left:g} left, {hours} needed).'}
-                    )
+                bucket = membership.free_hours_bucket_for(space)
+                # Only the shared pool refuses a booking it can't cover. A
+                # per-room grant that falls short just stops applying, and the
+                # space is booked on its normal terms -- a grant is a benefit
+                # and must never take away access the member already had.
+                if bucket == Membership.SHARED_POOL and bucket is not None:
+                    left = membership.hours_left_in(bucket)
+                    if left < hours:
+                        raise serializers.ValidationError(
+                            {'detail': f'Not enough free hours for {space.name} '
+                                       f'({left:g} left, {hours} needed).'}
+                        )
         return attrs
 
     def create(self, validated_data):
@@ -388,21 +396,29 @@ class BookingCreateSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({'detail': conflict})
 
             deducted = 0
-            if space.uses_free_hours and duration == Booking.Duration.HOURLY:
+            bucket = None
+            if duration == Booking.Duration.HOURLY:
                 membership = (Membership.objects.select_for_update()
                               .filter(user=user).select_related('plan').first())
                 if membership:
-                    membership.sync_period()
-                    if membership.room_hours_left < hours:
-                        raise serializers.ValidationError(
-                            {'detail': 'Not enough free meeting-room hours.'}
-                        )
-                    membership.room_hours_used = float(membership.room_hours_used) + hours
-                    membership.save(update_fields=['room_hours_used', 'hours_period'])
-                    deducted = hours
-                    validated_data['is_free'] = True
-                    validated_data['price'] = None
+                    bucket = membership.free_hours_bucket_for(space)
+                    if bucket is not None:
+                        if membership.hours_left_in(bucket) >= hours:
+                            membership.consume_hours(bucket, hours)
+                            deducted = hours
+                            validated_data['is_free'] = True
+                            validated_data['price'] = None
+                        elif not bucket:
+                            # Shared pool: unchanged, the booking is refused.
+                            raise serializers.ValidationError(
+                                {'detail': f'Not enough free hours for {space.name}.'}
+                            )
+                        # A per-room grant that can't cover this booking is left
+                        # alone -- those hours stay for a booking they do cover.
             validated_data['free_hours_used'] = deducted
+            # '' when nothing was deducted or the shared pool paid for it;
+            # otherwise the space id of the grant that did.
+            validated_data['free_hours_bucket'] = bucket if deducted else ''
             admin_settings = AdminSettings.load()
 
             # "Pay at center" off → money must be taken online, so the direct
@@ -546,6 +562,8 @@ class MembershipSerializer(serializers.ModelSerializer):
     room_hours_left = serializers.FloatField(read_only=True)
     guest_passes_left = serializers.IntegerField(read_only=True)
     effective_hours = serializers.IntegerField(read_only=True)
+    # Per-space free hours granted to this member, with balances.
+    space_hours_summary = serializers.JSONField(read_only=True)
     price_display = serializers.CharField(read_only=True)
     is_custom = serializers.BooleanField(read_only=True)
     display_name = serializers.CharField(read_only=True)
@@ -556,7 +574,8 @@ class MembershipSerializer(serializers.ModelSerializer):
         model = Membership
         fields = (
             'status', 'member_since', 'room_hours_used', 'room_hours_left',
-            'effective_hours', 'guest_passes_used', 'guest_passes_left',
+            'effective_hours', 'space_hours_summary',
+            'guest_passes_used', 'guest_passes_left',
             'custom_components', 'custom_price', 'custom_price_label',
             'custom_plan_name', 'display_name', 'price_display', 'is_custom', 'plan',
             'schedule_change_requested', 'pending_components',

@@ -124,6 +124,15 @@ class Membership(models.Model):
     # Per-client override of the plan's monthly free meeting-room hours. When null
     # the plan's own room_hours applies. Set by an admin for bespoke arrangements.
     monthly_hours = models.PositiveIntegerField(null=True, blank=True)
+    # Per-space free hours granted in the admin's Customize modal, keyed by space
+    # id: {"3": 10, "5": 4}. A space listed here is free for this member with its
+    # own monthly allowance, whether or not Space.uses_free_hours is set — the
+    # admin ticked that room for this member specifically. Spaces that aren't
+    # listed fall back to the shared meeting-room pool (monthly_hours / plan).
+    space_hours = models.JSONField(default=dict, blank=True)
+    # Usage against those per-space allowances, same keys. Zeroed alongside
+    # room_hours_used when the month rolls over.
+    space_hours_used = models.JSONField(default=dict, blank=True)
     # The YYYY-MM period the current room_hours_used belongs to. Used by
     # sync_period() to zero usage on the 1st of a new month (hours don't carry over).
     hours_period = models.CharField(max_length=7, blank=True)
@@ -171,7 +180,7 @@ class Membership(models.Model):
         """Whether this membership carries any bespoke overrides."""
         return bool(self.custom_plan_name or self.custom_components
                     or self.custom_price is not None or self.custom_price_label
-                    or self.monthly_hours is not None)
+                    or self.monthly_hours is not None or bool(self.space_hours))
 
     @property
     def has_schedule_change(self):
@@ -199,8 +208,10 @@ class Membership(models.Model):
         if self.hours_period != period:
             self.hours_period = period
             self.room_hours_used = 0
+            self.space_hours_used = {}
             if self.pk:
-                self.save(update_fields=['hours_period', 'room_hours_used'])
+                self.save(update_fields=['hours_period', 'room_hours_used',
+                                         'space_hours_used'])
             return True
         return False
 
@@ -208,6 +219,124 @@ class Membership(models.Model):
     def room_hours_left(self):
         self.sync_period()
         return max(0, float(self.effective_hours) - float(self.room_hours_used))
+
+    # --- Free-hour buckets -------------------------------------------------
+    # A member's free hours live in one of two places: the shared meeting-room
+    # pool (bucket '') that every uses_free_hours space draws on, or a per-space
+    # allowance the admin granted in the Customize modal (bucket = the space id
+    # as a string). Bookings record which bucket they drew from so a cancellation
+    # refunds the right one even if the grant changed in between.
+    SHARED_POOL = ''
+
+    def space_allowance(self, space_id):
+        """Hours/month granted for one specific space, or None when not granted."""
+        raw = (self.space_hours or {}).get(str(space_id))
+        if raw in (None, ''):
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def free_hours_bucket_for(self, space):
+        """Which allowance an hourly booking of `space` draws down.
+
+        The space id when this member was granted that room individually, the
+        shared pool when the space is flagged uses_free_hours, and None when the
+        space isn't covered by free hours at all. A per-space grant wins over the
+        flag — it was set for this member on purpose.
+        """
+        if self.space_allowance(space.id) is not None:
+            return str(space.id)
+        if space.uses_free_hours:
+            return self.SHARED_POOL
+        return None
+
+    def hours_total_in(self, bucket):
+        """The monthly allowance of a bucket."""
+        if bucket:
+            return self.space_allowance(bucket) or 0.0
+        return float(self.effective_hours)
+
+    def hours_used_in(self, bucket):
+        """Hours already spent from a bucket this month."""
+        if not bucket:
+            return float(self.room_hours_used)
+        try:
+            return float((self.space_hours_used or {}).get(str(bucket)) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def hours_left_in(self, bucket):
+        """Remaining hours in a bucket, after a lazy month rollover."""
+        self.sync_period()
+        return max(0.0, self.hours_total_in(bucket) - self.hours_used_in(bucket))
+
+    def _store_used(self, bucket, value):
+        """Write a bucket's usage back and save just that field."""
+        if bucket:
+            used = dict(self.space_hours_used or {})
+            used[str(bucket)] = value
+            self.space_hours_used = used
+            self.save(update_fields=['space_hours_used', 'hours_period'])
+        else:
+            self.room_hours_used = value
+            self.save(update_fields=['room_hours_used', 'hours_period'])
+
+    def consume_hours(self, bucket, hours):
+        """Spend `hours` from a bucket. Call under select_for_update."""
+        self._store_used(bucket, self.hours_used_in(bucket) + float(hours))
+
+    def refund_hours(self, bucket, hours):
+        """Return `hours` to a bucket, never below zero."""
+        self._store_used(bucket, max(0.0, self.hours_used_in(bucket) - float(hours)))
+
+    @property
+    def shared_hours_apply(self):
+        """Whether the shared meeting-room pool can still be spent.
+
+        False once every space that runs on it is also granted to this member
+        per-space: the pool is then superseded, and showing it alongside the
+        per-room balances would double-count the same room. Not a data change —
+        the hours stay on the record and apply again the moment a grant is
+        removed or a new space is flagged.
+        """
+        granted = [int(k) for k in (self.space_hours or {}) if str(k).isdigit()]
+        if not granted:
+            return True          # nothing to supersede it
+        from django.apps import apps
+        Space = apps.get_model('bookings', 'Space')
+        return (Space.objects.filter(uses_free_hours=True, is_active=True)
+                .exclude(id__in=granted).exists())
+
+    @property
+    def space_hours_summary(self):
+        """Per-space allowances with this month's usage, for the API and UI.
+
+        [{space, name, total, used, left}, ...] in space order. Grants for a space
+        that has since been deleted are skipped rather than shown as a blank row.
+        """
+        grants = self.space_hours or {}
+        if not grants:
+            return []
+        self.sync_period()
+        from django.apps import apps
+        Space = apps.get_model('bookings', 'Space')
+        ids = [k for k in grants if str(k).isdigit()]
+        spaces = Space.objects.filter(id__in=ids).order_by('order', 'name')
+        rows = []
+        for sp in spaces:
+            total = self.space_allowance(sp.id) or 0.0
+            used = self.hours_used_in(str(sp.id))
+            rows.append({
+                'space': sp.id,
+                'key': sp.key,
+                'name': sp.name,
+                'total': total,
+                'used': used,
+                'left': max(0.0, total - used),
+            })
+        return rows
 
     @property
     def guest_passes_left(self):
@@ -443,6 +572,11 @@ class Booking(models.Model):
     is_free = models.BooleanField(default=True)
     # Free meeting-room hours drawn down by this booking (for exact refund on cancel).
     free_hours_used = models.DecimalField(max_digits=5, decimal_places=1, default=0)
+    # Which allowance those hours came from: '' = the shared meeting-room pool,
+    # otherwise the space id of a per-space grant. Recorded so a cancellation
+    # refunds the bucket that was actually charged, even if the admin has since
+    # changed the member's grants (see Membership.free_hours_bucket_for).
+    free_hours_bucket = models.CharField(max_length=24, blank=True, default='')
     price = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
     # Payment settled at the center (only meaningful for paid bookings).
     is_paid = models.BooleanField(default=False)

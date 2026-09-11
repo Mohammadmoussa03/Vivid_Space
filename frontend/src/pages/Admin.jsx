@@ -251,14 +251,27 @@ const USER_TONE = { Active: 'green', Pending: 'amber', Deactivated: 'neutral', R
    free hours — both render as a dash rather than a misleading "0 h left". */
 function roomHours(u) {
   const total = Number(u.effective_hours || 0);
-  if (u.room_hours_left == null || total <= 0) return <span style={{ fontSize: 14, color: MS.faint }}>—</span>;
+  // Rooms granted to this member individually, each with its own allowance.
+  const rooms = u.space_hours || [];
+  // The shared pill is dropped once per-room grants have superseded it, so the
+  // same room can't be counted twice in one cell.
+  const hasPool = u.room_hours_left != null && total > 0 && u.shared_hours_apply !== false;
+  if (!hasPool && rooms.length === 0) return <span style={{ fontSize: 14, color: MS.faint }}>—</span>;
   const left = Number(u.room_hours_left || 0);
   const tone = left <= 0 ? TONES.red : (left <= total / 4 ? TONES.amber : TONES.green);
   return (
-    <span title={`Free meeting-room hours included in this member's package: ${fmtHrs(left)} of ${fmtHrs(total)} h still available this month.`}
+    <span title={[
+      hasPool ? `Shared meeting-room hours: ${fmtHrs(left)} of ${fmtHrs(total)} h left this month.` : '',
+      ...rooms.map((r) => `${r.name}: ${fmtHrs(r.left)} of ${fmtHrs(r.total)} h left this month.`),
+    ].filter(Boolean).join('\n')}
       style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-      {pill(tone.bg, tone.color, `${fmtHrs(left)} / ${fmtHrs(total)} h left`)}
-      <span style={{ fontSize: 11.5, color: MS.faint }}>{fmtHrs(Number(u.room_hours_used || 0))} h used this month</span>
+      {hasPool && pill(tone.bg, tone.color, `${fmtHrs(left)} / ${fmtHrs(total)} h left`)}
+      {hasPool && <span style={{ fontSize: 11.5, color: MS.faint }}>{fmtHrs(Number(u.room_hours_used || 0))} h used this month</span>}
+      {rooms.map((r) => (
+        <span key={r.space} style={{ fontSize: 11.5, color: MS.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {r.name}: <strong style={{ fontWeight: 600 }}>{fmtHrs(r.left)}</strong> / {fmtHrs(r.total)} h
+        </span>
+      ))}
     </span>
   );
 }
@@ -469,13 +482,24 @@ function CustomizeModal({ user, onClose }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [hours, setHours] = useState(null);   // {used, left, total} — this month's free-hour balance
+  const [spaces, setSpaces] = useState([]);   // every bookable space, for the free-space ticks
+  const [spaceHours, setSpaceHours] = useState({}); // space id -> hours/month granted ('' while typing)
+  const [spaceUsed, setSpaceUsed] = useState({});   // space id -> hours used this month
 
   useEffect(() => {
-    Promise.all([adminPackages(true), adminUserMembership(user.id)])
-      .then(([pk, ms]) => {
+    Promise.all([adminPackages(true), adminUserMembership(user.id), adminSpaces()])
+      .then(([pk, ms, sp]) => {
         const list = Array.isArray(pk) ? pk : [];
         setPlans(list);
+        setSpaces((Array.isArray(sp) ? sp : []).filter((x) => x.is_active !== false));
         const m = ms?.membership;
+        // Per-space free hours: {"3": 10} from the API, kept as strings so the
+        // number inputs can be cleared while typing.
+        const grants = m?.space_hours || {};
+        setSpaceHours(Object.fromEntries(Object.entries(grants).map(([k, v]) => [String(k), String(v)])));
+        setSpaceUsed(Object.fromEntries(
+          (m?.space_hours_summary || []).map((r) => [String(r.space), Number(r.used || 0)])
+        ));
         // Rebuild the allocation from stored components (dated or lifetime).
         const comps = (m?.custom_components || []).filter((c) => c && c.plan != null);
         const order = [];
@@ -528,6 +552,17 @@ function CustomizeModal({ user, onClose }) {
     // A lifetime package holds no specific days.
     if (life) setAssign((a) => Object.fromEntries(Object.entries(a).filter(([, v]) => String(v) !== String(pid))));
   };
+  // Free spaces: ticking a space grants it to this member with its own monthly
+  // allowance; untick removes the grant entirely.
+  const spaceGranted = (id) => Object.prototype.hasOwnProperty.call(spaceHours, String(id));
+  const toggleSpace = (id) => setSpaceHours((h) => {
+    const n = { ...h };
+    if (Object.prototype.hasOwnProperty.call(n, String(id))) delete n[String(id)];
+    else n[String(id)] = '';
+    return n;
+  });
+  const setSpaceHrs = (id, v) => setSpaceHours((h) => ({ ...h, [String(id)]: v }));
+
   const toggleDay = (iso) => {
     if (!active || isLifetime(active)) return;
     setAssign((a) => { const n = { ...a }; if (String(n[iso]) === String(active)) delete n[iso]; else n[iso] = active; return n; });
@@ -551,6 +586,12 @@ function CustomizeModal({ user, onClose }) {
     // Include packages that are lifetime or have at least one assigned day.
     const inUse = alloc.filter((pid) => isLifetime(pid) || countFor(pid) > 0);
     if (inUse.length === 0) { setErr('Add a package, then pick its days or mark it lifetime.'); return; }
+    const blankSpace = Object.entries(spaceHours).find(([, v]) => v === '' || !(Number(v) > 0));
+    if (blankSpace) {
+      const sp = spaces.find((x) => String(x.id) === String(blankSpace[0]));
+      setErr(`Set the monthly free hours for ${sp?.name || 'the ticked space'} (or untick it).`);
+      return;
+    }
     // The membership still needs a plan FK; the first package in the mix is it.
     const planFk = inUse[0];
     const components = inUse.map((pid) => (isLifetime(pid)
@@ -565,6 +606,13 @@ function CustomizeModal({ user, onClose }) {
       custom_price: form.custom_price === '' ? null : Number(form.custom_price),
       custom_price_label: form.custom_price_label || '',
       custom_components: components,
+      // Only ticked spaces with a positive allowance are sent; the backend
+      // drops anything else.
+      space_hours: Object.fromEntries(
+        Object.entries(spaceHours)
+          .filter(([, v]) => v !== '' && Number(v) > 0)
+          .map(([k, v]) => [k, Number(v)])
+      ),
     };
     setBusy(true);
     try { await adminSetUserMembership(user.id, payload); onClose(true); }
@@ -577,6 +625,13 @@ function CustomizeModal({ user, onClose }) {
   // Placeholder hints (plan default hours / price) come from the first package in the mix.
   const basePlan = plans.find((p) => String(p.id) === String(alloc[0]));
   const unpicked = plans.filter((p) => !alloc.some((x) => String(x) === String(p.id)));
+  // Rooms offered as tick boxes: everything that ISN'T already covered by the
+  // monthly meeting-room hours below, so no room is controlled in two places.
+  const tickable = spaces.filter((sp) => !sp.uses_free_hours);
+  // A meeting room can still carry a per-room grant from before it was flagged
+  // (or before this rule). It's excluded above, so surface it here — an active
+  // allowance nobody can see or remove is the one outcome to avoid.
+  const strandedGrants = spaces.filter((sp) => sp.uses_free_hours && spaceGranted(sp.id));
 
   return (
     <div onClick={() => onClose(false)} style={{ position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(20,18,16,0.62)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 'clamp(14px,4vw,40px)', animation: 'ms-fade 200ms ease-out both' }}>
@@ -689,6 +744,55 @@ function CustomizeModal({ user, onClose }) {
                 {[['active', 'Active'], ['paused', 'Paused'], ['cancelled', 'Cancelled']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
               </select>
             </div>
+            {/* Free spaces — tick a room to include it in this member's package
+                with its own monthly hour allowance. */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {label('Free spaces (hours per month)')}
+              {tickable.length === 0 ? (
+                <p style={{ fontSize: 12.5, color: '#A9A39C', margin: 0 }}>No other spaces to offer yet.</p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, border: `1px solid ${MS.line}`, borderRadius: 12, padding: 10, background: '#fff' }}>
+                  {tickable.map((sp) => {
+                    const on = spaceGranted(sp.id);
+                    const used = spaceUsed[String(sp.id)] || 0;
+                    const total = Number(spaceHours[String(sp.id)] || 0);
+                    return (
+                      <div key={sp.id} style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10, padding: '6px 4px', borderRadius: 9, background: on ? 'rgba(46,115,224,0.06)' : 'transparent' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 9, flex: '1 1 150px', minWidth: 0, cursor: 'pointer' }}>
+                          <input type="checkbox" checked={on} onChange={() => toggleSpace(sp.id)}
+                            style={{ width: 16, height: 16, flex: '0 0 auto', accentColor: MS.accent, cursor: 'pointer' }} />
+                          <span style={{ fontSize: 14, color: MS.ink, fontWeight: on ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sp.name}</span>
+                        </label>
+                        {on && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 7, flex: '0 0 auto' }}>
+                            <input type="number" min="0" step="0.5" value={spaceHours[String(sp.id)]}
+                              onChange={(e) => setSpaceHrs(sp.id, e.target.value)} placeholder="0"
+                              style={{ ...inp, width: 86, padding: '7px 9px', textAlign: 'right' }} />
+                            <span style={{ fontSize: 12.5, color: MS.faint }}>h/mo</span>
+                          </div>
+                        )}
+                        {on && used > 0 && (
+                          <span style={{ fontSize: 12, color: MS.muted, flex: '1 1 100%' , paddingLeft: 25 }}>
+                            {fmtHrs(Math.max(0, total - used))} h left this month · {fmtHrs(used)} h used
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <p style={{ fontSize: 12.5, color: '#A9A39C', margin: 0 }}>
+                A ticked space is free for this member up to its hours each month, with its own balance. Meeting rooms aren't listed here — they run on the monthly hours below.
+              </p>
+              {strandedGrants.map((sp) => (
+                <p key={sp.id} style={{ fontSize: 12.5, color: MS.muted, margin: 0 }}>
+                  {sp.name} still has a per-room grant of {fmtHrs(Number(spaceHours[String(sp.id)] || 0))} h/mo from earlier, which overrides the monthly hours below.{' '}
+                  <button type="button" onClick={() => toggleSpace(sp.id)}
+                    style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', color: MS.red, fontWeight: 600, cursor: 'pointer' }}>Remove it</button>
+                </p>
+              ))}
+            </div>
+
             <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
               {label('Monthly meeting-room hours (blank = plan default)')}
               <input type="number" min="0" value={form.monthly_hours} onChange={(e) => set('monthly_hours', e.target.value)}

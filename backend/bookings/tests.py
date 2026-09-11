@@ -51,7 +51,7 @@ class FreeHoursTests(BookingTestBase):
         self.membership.save()
         resp = self.book(hours=2, start_time='08:00')
         self.assertEqual(resp.status_code, 400)
-        self.assertIn('free meeting-room hours', str(resp.data))
+        self.assertIn('Not enough free hours', str(resp.data))
 
     def test_cancel_refunds_hours(self):
         resp = self.book(hours=3)
@@ -732,7 +732,7 @@ class ChangeRequestTests(BookingTestBase):
         self.assertEqual(self.request_change(start_time='09:00', hours=5).status_code, 200)
         resp = self.approve()
         self.assertEqual(resp.status_code, 400)
-        self.assertIn('free meeting-room hours', str(resp.data))
+        self.assertIn('Not enough free hours', str(resp.data))
         b = Booking.objects.get(pk=self.booking_id)
         self.assertTrue(b.change_requested)       # rolled back, still pending
         self.assertEqual(b.date, self.tomorrow)

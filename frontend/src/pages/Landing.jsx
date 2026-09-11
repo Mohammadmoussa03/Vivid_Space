@@ -1714,7 +1714,7 @@ function BookingModal({ space, onClose, whishEnabled, payAtCenter = true }) {
   const [avail, setAvail] = useState(null);
   const [fdTaken, setFdTaken] = useState([]);   // full-day: unit labels booked on selected days
   const [mem, setMem] = useState(null);         // member's plan/free-hours balance
-  const [memLoading, setMemLoading] = useState(!!space.uses_free_hours);
+  const [memLoading, setMemLoading] = useState(true);
   const [fdLoading, setFdLoading] = useState(false);  // full-day unit availability in flight
   const [availLoading, setAvailLoading] = useState(false);
   const [result, setResult] = useState(null); // { count, failed, first }
@@ -1797,20 +1797,27 @@ function BookingModal({ space, onClose, whishEnabled, payAtCenter = true }) {
   // is still loading (the `occupied` set would be stale).
   const unitReady = !needsUnit || (isHourly ? true : !fdLoading);
   const unitOk = (!needsUnit || (!!unit && !occupied.has(unit))) && unitReady;
-  // Free meeting-room hours: for spaces that draw them down, load the member's
-  // balance so we can show hours-used instead of a price when it's covered.
+  // Free hours: load the member's balance so we can show hours-used instead of a
+  // price when this booking is covered. Always loaded — beyond the spaces flagged
+  // uses_free_hours, the admin can grant this member any space individually, and
+  // we can't tell which from the space alone.
   const loadMem = useCallback(() => {
-    if (!space.uses_free_hours) { setMem(null); setMemLoading(false); return; }
     setMemLoading(true);
     getOverview().then((o) => setMem(o?.membership || null)).catch(() => {}).finally(() => setMemLoading(false));
-  }, [space.uses_free_hours]);
+  }, []);
   useEffect(() => { loadMem(); }, [loadMem]);
 
-  const freeTotal = mem ? (mem.effective_hours ?? mem.plan?.room_hours ?? 0) : 0;
-  const freeLeft = mem ? (mem.room_hours_left ?? 0) : 0;
-  const usesFree = space.uses_free_hours && isHourly && !!mem;   // member booking a free-hours space
+  // A per-space grant from this member's package wins over the shared pool —
+  // same precedence as Membership.free_hours_bucket_for on the backend.
+  const grant = (mem?.space_hours_summary || []).find((r) => String(r.space) === String(space.id));
+  const freeTotal = grant ? Number(grant.total || 0) : (mem ? (mem.effective_hours ?? mem.plan?.room_hours ?? 0) : 0);
+  const freeLeft = grant ? Number(grant.left || 0) : (mem ? (mem.room_hours_left ?? 0) : 0);
+  const usesFree = isHourly && !!mem && (!!grant || space.uses_free_hours);
   const coveredByFree = usesFree && freeLeft >= hours;
-  const notEnoughFree = usesFree && freeLeft < hours;
+  const notEnoughFree = usesFree && freeLeft < hours && !grant;
+  // A per-room grant that can't cover this booking stays unspent and the
+  // room is priced normally — say so rather than letting the total surprise them.
+  const grantShort = usesFree && freeLeft < hours && !!grant;
 
   const rate = space.hour_price != null ? space.hour_price : space.day_price;
   const rateNum = space.hour_price != null ? Number(space.hour_price) : Number(space.day_price);
@@ -2041,18 +2048,25 @@ function BookingModal({ space, onClose, whishEnabled, payAtCenter = true }) {
                   <div style={{ background: 'rgba(63,122,90,0.12)', color: MS.green, borderRadius: 12, padding: '16px 18px', margin: '18px 0', lineHeight: 1.5 }}>
                     <div style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 20 }}>Free with your plan</div>
                     <div style={{ fontSize: 13.5, fontWeight: 500, marginTop: 4 }}>
-                      Using <strong>{hours} of your {freeTotal} free meeting-room hour{freeTotal === 1 ? '' : 's'}</strong> · {Math.max(0, freeLeft - hours)} hr{Math.max(0, freeLeft - hours) === 1 ? '' : 's'} left after this
+                      Using <strong>{hours} of your {freeTotal} free {grant ? `${space.name} ` : 'meeting-room '}hour{freeTotal === 1 ? '' : 's'}</strong> · {Math.max(0, freeLeft - hours)} hr{Math.max(0, freeLeft - hours) === 1 ? '' : 's'} left after this
                     </div>
                   </div>
                 ) : notEnoughFree ? (
                   <div style={{ background: 'rgba(168,90,74,0.12)', color: MS.red, fontSize: 13, fontWeight: 500, padding: '12px 14px', borderRadius: 10, margin: '18px 0', lineHeight: 1.4 }}>
-                    You have {freeLeft} free hour{freeLeft === 1 ? '' : 's'} left, but this booking needs {hours}. Lower the hours to book it with your plan.
+                    You have {freeLeft} free hour{freeLeft === 1 ? '' : 's'} left{grant ? ` for ${space.name}` : ''}, but this booking needs {hours}. Lower the hours to book it with your plan.
                   </div>
                 ) : (
-                  <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', borderTop: `1px solid ${MS.line}`, paddingTop: 16, margin: '18px 0' }}>
-                    <span style={{ fontSize: 15, color: MS.muted }}>Total</span>
-                    <span style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 28 }}>{price}</span>
-                  </div>
+                  <>
+                    {grantShort && (
+                      <div style={{ background: 'rgba(20,18,16,0.05)', color: MS.muted, fontSize: 13, fontWeight: 500, padding: '12px 14px', borderRadius: 10, margin: '18px 0 0', lineHeight: 1.45 }}>
+                        Your {freeLeft} free hour{freeLeft === 1 ? '' : 's'} for {space.name} {freeLeft === 1 ? "doesn't" : "don't"} cover a {hours}-hour booking, so this one is at the normal rate — {freeLeft === 1 ? 'it stays' : 'they stay'} available for a shorter booking.
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', borderTop: `1px solid ${MS.line}`, paddingTop: 16, margin: '18px 0' }}>
+                      <span style={{ fontSize: 15, color: MS.muted }}>Total</span>
+                      <span style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 28 }}>{price}</span>
+                    </div>
+                  </>
                 )}
                 {/* Paid bookings are settled online via Whish */}
                 {canPayWhish && (
@@ -2122,6 +2136,12 @@ function DashboardModal({ user, onClose }) {
   const freeTotal = m?.effective_hours ?? m?.plan?.room_hours ?? 0;
   const freeLeft = m?.room_hours_left ?? 0;
   const freePct = freeTotal ? Math.round((freeLeft / freeTotal) * 100) : 0;
+  // Rooms included free in this member's package, each with its own monthly
+  // allowance (set by an admin in Customize package).
+  const spaceHours = m?.space_hours_summary || [];
+  // Once every free-hours room is granted per-room below, the shared figure is
+  // just one of those cards repeated — so it stops being its own KPI.
+  const sharedApplies = stats.shared_hours_apply !== false;
 
   // The admin can split a member's month across several packages (dated
   // custom_components). Colour each package's days and let the member browse
@@ -2179,7 +2199,7 @@ function DashboardModal({ user, onClose }) {
               {m?.is_custom && <span style={{ background: 'rgba(155,126,189,0.16)', color: MS.accent, fontSize: 11, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', padding: '3px 9px', borderRadius: 9999 }}>Custom</span>}
             </div>,
             <p style={{ color: MS.muted, fontSize: 14, margin: '6px 0 0' }}>{m ? `${m.price_display ? `${m.price_display} · ` : ''}${m.member_since ? `Member since ${new Date(m.member_since).getFullYear()}` : ''}` : '—'}</p>)}
-          {kpi('Free meeting-room hours',
+          {sharedApplies && kpi('Free meeting-room hours',
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}><span style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 24 }}><CountUp value={Number(freeLeft) || 0} /></span><span style={{ color: MS.muted, fontSize: 14 }}>/ {freeTotal} left</span></div>,
             <div style={{ height: 8, background: '#E9E4DD', borderRadius: 9999, marginTop: 14, overflow: 'hidden' }}><div style={{ height: '100%', background: MS.accent, borderRadius: 9999, width: `${freePct}%` }} /></div>)}
           {kpi('Bookings this month',
@@ -2189,6 +2209,30 @@ function DashboardModal({ user, onClose }) {
             <p style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 24, margin: 0 }}><CountUp value={(overview?.upcoming || []).length} /></p>,
             <p style={{ color: MS.muted, fontSize: 14, margin: '6px 0 0' }}>scheduled ahead</p>)}
         </div>
+
+        {spaceHours.length > 0 && (
+          <div style={{ background: '#fff', border: `1px solid ${MS.line}`, borderRadius: 16, padding: 'clamp(20px,3vw,28px)', marginBottom: 44 }}>
+            <h3 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 19, margin: '0 0 4px' }}>Rooms included in your package</h3>
+            <p style={{ color: MS.muted, fontSize: 13.5, margin: '0 0 18px' }}>Free hours reset at the start of each month.</p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14 }}>
+              {spaceHours.map((r) => {
+                const pct = r.total ? Math.round((r.left / r.total) * 100) : 0;
+                return (
+                  <div key={r.space} style={{ border: `1px solid ${MS.line}`, borderRadius: 13, padding: '14px 16px' }}>
+                    <p style={{ fontSize: 13.5, fontWeight: 600, color: MS.ink, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.name}</p>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginTop: 6 }}>
+                      <span style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 22 }}>{r.left}</span>
+                      <span style={{ color: MS.muted, fontSize: 13.5 }}>/ {r.total} hrs left</span>
+                    </div>
+                    <div style={{ height: 7, background: '#E9E4DD', borderRadius: 9999, marginTop: 11, overflow: 'hidden' }}>
+                      <div style={{ height: '100%', background: MS.accent, borderRadius: 9999, width: `${pct}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {allocComps.length > 0 && (
           <div style={{ background: '#fff', border: `1px solid ${MS.line}`, borderRadius: 16, padding: 'clamp(20px,3vw,28px)', marginBottom: 44 }}>

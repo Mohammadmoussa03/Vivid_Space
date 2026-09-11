@@ -205,6 +205,10 @@ class AdminUserViewSet(viewsets.ModelViewSet):
                 'effective_hours': membership.effective_hours,
                 'room_hours_used': float(membership.room_hours_used),
                 'room_hours_left': membership.room_hours_left,
+                # Per-space free hours: the raw grants (to prefill the tick
+                # boxes) plus this month's usage per space (to show a balance).
+                'space_hours': membership.space_hours or {},
+                'space_hours_summary': membership.space_hours_summary,
                 'custom_components': membership.custom_components or [],
                 'custom_price': (None if membership.custom_price is None
                                  else float(membership.custom_price)),
@@ -278,6 +282,35 @@ class AdminUserViewSet(viewsets.ModelViewSet):
                     pass
                 cleaned.append(entry)
             defaults['custom_components'] = cleaned
+        if 'space_hours' in data:
+            # {"<space id>": hours/month} — the spaces ticked in the Customize
+            # modal. Unknown or deleted space ids and non-numeric/zero-or-less
+            # hours are dropped rather than stored: a grant of "0 hours" would
+            # read as "free room, no allowance" and block the space entirely.
+            raw = data.get('space_hours') or {}
+            grants = {}
+            if isinstance(raw, dict):
+                valid = set(Space.objects.filter(
+                    id__in=[k for k in raw if str(k).isdigit()]
+                ).values_list('id', flat=True))
+                for key, value in raw.items():
+                    if not str(key).isdigit() or int(key) not in valid:
+                        continue
+                    try:
+                        hours = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if hours > 0:
+                        grants[str(key)] = hours
+            defaults['space_hours'] = grants
+            # Usage rows for spaces no longer granted would otherwise linger and
+            # silently eat into the allowance if the space is granted again.
+            existing = Membership.objects.filter(user=user).first()
+            if existing:
+                defaults['space_hours_used'] = {
+                    k: v for k, v in (existing.space_hours_used or {}).items()
+                    if k in grants
+                }
         if 'custom_price' in data:
             cp = data.get('custom_price')
             defaults['custom_price'] = None if cp in (None, '') else cp

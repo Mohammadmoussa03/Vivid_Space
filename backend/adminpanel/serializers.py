@@ -28,6 +28,8 @@ class AdminUserSerializer(serializers.ModelSerializer):
     room_hours_left = serializers.SerializerMethodField()
     room_hours_used = serializers.SerializerMethodField()
     effective_hours = serializers.SerializerMethodField()
+    space_hours = serializers.SerializerMethodField()
+    shared_hours_apply = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -35,7 +37,8 @@ class AdminUserSerializer(serializers.ModelSerializer):
             'id', 'uuid', 'email', 'first_name', 'last_name', 'company', 'full_name',
             'role', 'is_approved', 'is_active', 'date_joined', 'plan',
             'schedule_change_requested', 'schedule_change_days',
-            'room_hours_left', 'room_hours_used', 'effective_hours',
+            'room_hours_left', 'room_hours_used', 'effective_hours', 'space_hours',
+            'shared_hours_apply',
         )
         read_only_fields = fields
 
@@ -64,6 +67,32 @@ class AdminUserSerializer(serializers.ModelSerializer):
         membership = getattr(obj, 'membership', None)
         return float(membership.room_hours_used) if membership else None
 
+    # Rooms granted to this member individually, each with its own allowance.
+    # Without these the members table would show "—" for someone who has hours,
+    # just not in the shared pool.
+    def get_space_hours(self, obj):
+        membership = getattr(obj, 'membership', None)
+        return membership.space_hours_summary if membership else []
+
+    def get_shared_hours_apply(self, obj):
+        """False when per-room grants have superseded the shared pool.
+
+        The flagged-space ids are the same for every row, so they're resolved
+        once per response rather than per member.
+        """
+        membership = getattr(obj, 'membership', None)
+        if not membership:
+            return True
+        granted = {int(k) for k in (membership.space_hours or {}) if str(k).isdigit()}
+        if not granted:
+            return True          # nothing to supersede it — and no query needed
+        flagged = self.context.get('_flagged_space_ids')
+        if flagged is None:
+            flagged = set(Space.objects.filter(uses_free_hours=True, is_active=True)
+                          .values_list('id', flat=True))
+            self.context['_flagged_space_ids'] = flagged
+        return bool(flagged - granted)
+
     def get_effective_hours(self, obj):
         membership = getattr(obj, 'membership', None)
         return membership.effective_hours if membership else None
@@ -79,6 +108,8 @@ class ClientSerializer(serializers.ModelSerializer):
     room_hours_left = serializers.SerializerMethodField()
     room_hours_used = serializers.SerializerMethodField()
     effective_hours = serializers.SerializerMethodField()
+    space_hours = serializers.SerializerMethodField()
+    shared_hours_apply = serializers.SerializerMethodField()
     bookings_count = serializers.SerializerMethodField()
 
     class Meta:
@@ -86,7 +117,7 @@ class ClientSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'full_name', 'email', 'company', 'initials', 'package', 'perks',
             'is_active', 'room_hours_left', 'room_hours_used', 'effective_hours',
-            'bookings_count',
+            'space_hours', 'shared_hours_apply', 'bookings_count',
         )
 
     def get_initials(self, obj):
@@ -104,8 +135,10 @@ class ClientSerializer(serializers.ModelSerializer):
         bits = []
         if membership.plan.guest_passes:
             bits.append(f'{membership.plan.guest_passes} guest passes')
-        if membership.effective_hours:
+        if membership.effective_hours and membership.shared_hours_apply:
             bits.append(f'{membership.effective_hours} room hrs')
+        # Rooms granted to this member individually, each with its own allowance.
+        bits += [f"{r['name']} {r['total']:g} hrs" for r in membership.space_hours_summary]
         return ', '.join(bits) or '—'
 
     def get_room_hours_left(self, obj):
@@ -119,6 +152,14 @@ class ClientSerializer(serializers.ModelSerializer):
     def get_effective_hours(self, obj):
         membership = getattr(obj, 'membership', None)
         return membership.effective_hours if membership else 0
+
+    def get_space_hours(self, obj):
+        membership = getattr(obj, 'membership', None)
+        return membership.space_hours_summary if membership else []
+
+    def get_shared_hours_apply(self, obj):
+        membership = getattr(obj, 'membership', None)
+        return membership.shared_hours_apply if membership else True
 
     def get_bookings_count(self, obj):
         return obj.bookings.exclude(status=Booking.Status.CANCELLED).count()

@@ -375,8 +375,8 @@ class BookingViewSet(viewsets.ModelViewSet):
                             status=status.HTTP_400_BAD_REQUEST)
         booking.status = Booking.Status.CANCELLED
         booking.save(update_fields=['status'])
-        _refund_free_hours(booking)
-        _send_booking_cancellation(booking)
+        refunded = _refund_free_hours(booking)
+        _send_booking_cancellation(booking, refunded)
         return Response(BookingSerializer(booking).data)
 
     @action(detail=True, methods=['post'], url_path='request-change')
@@ -666,6 +666,10 @@ class OverviewView(APIView):
         stats = {
             'this_month': this_month,
             'room_hours_left': membership.room_hours_left if membership else 0,
+            'space_hours': membership.space_hours_summary if membership else [],
+            # False = every free-hours space is granted per-room, so the shared
+            # meeting-room figure would just repeat one of those cards.
+            'shared_hours_apply': membership.shared_hours_apply if membership else True,
             'guest_passes_left': membership.guest_passes_left if membership else 0,
             'member_since': membership.member_since.year if membership else user.date_joined.year,
         }
@@ -1024,7 +1028,7 @@ def _send_schedule_change_result(membership, approved):
     )
 
 
-def _send_booking_cancellation(booking):
+def _send_booking_cancellation(booking, refunded_hours=0):
     """Email the member confirming their booking was cancelled (best-effort)."""
 
     user = booking.user
@@ -1036,8 +1040,10 @@ def _send_booking_cancellation(booking):
         f'Your booking has been cancelled.\n\n'
         f'Space: {booking.space.name}{unit}\n'
         f'Date:  {booking.date:%A, %d %b %Y}\n\n'
-        + ('Any free meeting-room hours used have been returned to your balance.\n'
-           if booking.space.uses_free_hours else '')
+        + (f'{refunded_hours:g} free hour'
+           f'{"" if refunded_hours == 1 else "s"} for {booking.space.name} '
+           f'{"has" if refunded_hours == 1 else "have"} been returned to your balance.\n'
+           if refunded_hours else '')
         + '\nHope to see you again soon.\n'
     )
     send_branded_mail(
@@ -1048,27 +1054,37 @@ def _send_booking_cancellation(booking):
 
 
 def _refund_free_hours(booking):
-    """Return free meeting-room hours to a member when a booking is cancelled."""
+    """Return free hours to a member when a booking is cancelled.
+
+    Refunds the bucket the booking actually charged — a per-space grant or the
+    shared meeting-room pool — rather than re-deriving it, so a grant the admin
+    changed after the booking can't send the hours to the wrong balance.
+    """
     if not booking.free_hours_used:
-        return
+        return 0
     membership = Membership.objects.filter(user=booking.user).select_related('plan').first()
     if not membership:
-        return
+        return 0
+    refunded = float(booking.free_hours_used)
     membership.sync_period()
-    membership.room_hours_used = max(
-        0, float(membership.room_hours_used) - float(booking.free_hours_used)
-    )
-    membership.save(update_fields=['room_hours_used', 'hours_period'])
+    membership.refund_hours(booking.free_hours_bucket, booking.free_hours_used)
     booking.free_hours_used = 0
-    booking.save(update_fields=['free_hours_used'])
+    booking.free_hours_bucket = ''
+    booking.save(update_fields=['free_hours_used', 'free_hours_bucket'])
+    return refunded
 
 
 class NotEnoughHoursError(Exception):
-    """Raised when a reschedule needs more free meeting-room hours than the member has."""
+    """Raised when a reschedule needs more free hours than the member has.
 
-    def __init__(self, left, needed):
-        self.left, self.needed = left, needed
-        super().__init__(f'Not enough free meeting-room hours ({left:g} left, {needed} needed).')
+    `space` names the room whose allowance fell short — with per-space grants a
+    member can have hours left elsewhere, so the bare number isn't enough to act on.
+    """
+
+    def __init__(self, left, needed, space=''):
+        self.left, self.needed, self.space = left, needed, space
+        where = f' for {space}' if space else ''
+        super().__init__(f'Not enough free hours{where} ({left:g} left, {needed} needed).')
 
 
 def apply_booking_change(booking, new_date, duration, start, end, hours):
@@ -1086,22 +1102,30 @@ def apply_booking_change(booking, new_date, duration, start, end, hours):
         _refund_free_hours(booking)  # return the old allocation to the member's balance
 
         deducted = 0
-        if duration == Booking.Duration.HOURLY and space.uses_free_hours:
+        bucket = ''
+        if duration == Booking.Duration.HOURLY:
             membership = (Membership.objects.select_for_update()
                           .filter(user=booking.user).select_related('plan').first())
             if membership:
-                membership.sync_period()
-                if membership.room_hours_left < hours:
-                    raise NotEnoughHoursError(membership.room_hours_left, hours)
-                membership.room_hours_used = float(membership.room_hours_used) + hours
-                membership.save(update_fields=['room_hours_used', 'hours_period'])
-                deducted = hours
+                target = membership.free_hours_bucket_for(space)
+                if target is not None:
+                    left = membership.hours_left_in(target)
+                    if left >= hours:
+                        membership.consume_hours(target, hours)
+                        deducted = hours
+                        bucket = target
+                    elif not target:
+                        # Shared pool: unchanged, the reschedule is refused.
+                        raise NotEnoughHoursError(left, hours, space.name)
+                    # A per-room grant that falls short stops applying; the new
+                    # shape is priced normally below.
 
         booking.date = new_date
         booking.duration = duration
         booking.start_time = start
         booking.end_time = end
         booking.free_hours_used = deducted
+        booking.free_hours_bucket = bucket
 
         if deducted or space.is_free:
             booking.is_free = True
