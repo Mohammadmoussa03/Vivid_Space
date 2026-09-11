@@ -112,12 +112,14 @@ jobs:
           # deploy.sh is copied to /tmp before it runs: it pulls a new version
           # of *itself*, and bash reads a script incrementally — mutating the
           # file mid-run makes it resume at a shifted byte offset.
-          # SSM commands run as root; git calls use vivid_app so file ownership
-          # (and git's dubious-ownership check on /opt/vivid/app) stay right.
+          # SSM commands run as root under /bin/sh (dash), which has no
+          # `pipefail` — `set -eu` only. git calls use vivid_app so file
+          # ownership (and git's dubious-ownership check on /opt/vivid/app,
+          # which fails for root) stay right. deploy.sh itself is bash.
           cat > /tmp/params.json <<JSON
           {
             "commands": [
-              "set -euo pipefail",
+              "set -eu",
               "sudo -u vivid_app git -C /opt/vivid/app fetch origin main",
               "sudo -u vivid_app git -C /opt/vivid/app pull --ff-only origin main",
               "echo \"deploying \$(sudo -u vivid_app git -C /opt/vivid/app rev-parse --short HEAD) (workflow triggered by ${SHA:0:7})\"",

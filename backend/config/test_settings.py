@@ -13,6 +13,19 @@ DATABASES = {
     }
 }
 
+# The suite drives the API over plain HTTP. Without a local .env -- a fresh
+# clone, or CI -- DEBUG is False, which switches on the production hardening:
+# SECURE_SSL_REDIRECT then turns every request into a 301 and the whole suite
+# collapses (75 failures / 86 errors). Pin DEBUG and the transport flags here so
+# the tests behave identically wherever they run, and so a developer with a
+# .env sees the same result CI does.
+DEBUG = False
+SECURE_SSL_REDIRECT = False
+SECURE_HSTS_SECONDS = 0
+SESSION_COOKIE_SECURE = False
+CSRF_COOKIE_SECURE = False
+AUTH_COOKIE_SECURE = False
+
 # Keep tour-notification emails out of the console during tests.
 EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
 
