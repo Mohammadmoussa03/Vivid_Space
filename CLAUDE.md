@@ -52,7 +52,24 @@ frontend/   React 19 + Vite 8, react-router 7, axios. Inline-styled, token-drive
 - **Refresh rotation + blacklist.** `ROTATE_REFRESH_TOKENS` + `BLACKLIST_AFTER_ROTATION` + the `token_blacklist` app (needs `migrate`). Login sets cookies & returns only `{user, csrftoken}`; `CookieTokenRefreshView` rotates from the cookie (empty body); logout blacklists the refresh token. Access TTL is 15 min.
 - **Revoke on password change.** Any password reset calls `accounts/tokens.blacklist_user_tokens(user)` so pre-reset tokens die. Do the same for any new credential-changing endpoint.
 - **Email verification (hard gate).** Registration creates the account with `email_verified=False` and mails a link (`/?verify_uid=…&verify_token=…`); `LoginSerializer` refuses the login until it's True (**admins exempt**, so a mail outage can't lock you out of the admin panel). `POST /auth/verify-email/` redeems it, `POST /auth/resend-verification/` re-sends. The token comes from `accounts/tokens.EmailVerificationTokenGenerator` — a **different `key_salt`** from Django's password-reset generator so the two link types aren't interchangeable, with `email_verified` in the hash to make links single-use. Migration `0003` grandfathers pre-existing users to True; `seed_demo` sets it on every demo account (unverified accounts can't log in and nothing is mailed when seeding). **Changing your email via `PATCH /auth/me/` does *not* re-trigger verification** — a known gap.
-- **Anti-enumeration.** `POST /auth/register/` returns an identical generic response for new vs. existing emails (real owner gets an out-of-band email); the email field is declared explicitly to drop DRF's `UniqueValidator` 400. Don't reintroduce "email already exists" leaks on public endpoints.
+- **Phone prompt (post-signup, not a signup field).** Registration does *not* ask for a
+  number — Google sign-in couldn't supply one anyway, so a required signup field would only
+  cover one of the two doors. Instead `User.phone` (blank-able) pairs with
+  `User.phone_required`, and `User.needs_phone` (= `phone_required and not phone`) is
+  serialized to the frontend, where `<PhoneGateModal>` in `Landing.jsx` blocks the page until
+  the member answers. Migration `0006` grandfathers every pre-existing row to
+  `phone_required=False`, so **current members are never prompted**; `createsuperuser`
+  accounts are created exempt too (the prompt lives on the public site). The number is saved
+  through the existing `PATCH /auth/me/` (`ProfileUpdateSerializer`), whose response is the
+  full user shape — that's what unmounts the modal. Members change it later in
+  `<AccountEditModal>` (dashboard → "Your details", or the header avatar) via the same
+  endpoint; that form omits an empty `phone` from the payload so a grandfathered member isn't
+  blocked from editing their name by a field they never filled. Validation is deliberately
+  permissive (`clean_phone`: ≥6 digits, no format opinion) because members are
+  international. `phone` is **not** unique — a shared office line is legitimate, and a
+  unique constraint would reintroduce the enumeration leak the register endpoint goes out of
+  its way to avoid. Admins see it as its own column in Admin → Users.
+- **Anti-enumeration.** `POST /auth/register/` returns an identical generic response for new vs. existing emails (real owner gets an out-of-band email); the email field is declared explicitly to drop DRF's `UniqueValidator` 400. `ProfileUpdateSerializer` declares `email` for the same reason — without it `UniqueValidator` runs *before* the neutral `validate_email` and answers "user with this email already exists". Don't reintroduce "email already exists" leaks on public endpoints.
 - **Rate limiting / lockout.** DRF throttling (needs a shared cache — set `REDIS_URL` in prod; LocMem is per-process). Login has per-IP **and** per-account throttles (`accounts/throttling.py`); register/password-reset are scoped too.
 - **Admin/URL safety.** Admin-set URL fields (`maps_url`, `hero_media_url`) are validated http(s)/relative-only via `bookings.serializers.validate_safe_url` (+ frontend `safeUrl`). Admin serializers are read-only where they should be; `AdminUserViewSet` create is intentionally `405` (users self-register).
 - **UUIDs.** Every `User` has a non-sequential `uuid` (unique, exposed in user/admin payloads) for use as a public identifier; internal routing still uses the integer pk.

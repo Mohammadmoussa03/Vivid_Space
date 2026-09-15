@@ -158,15 +158,15 @@ CONTACT = {
 # Extra approved members shown in the Clients table.
 CLIENTS = [
     {'email': 'maya@loopstudio.co', 'first_name': 'Maya', 'last_name': 'Okonkwo',
-     'company': 'Loop Studio', 'plan': 'Private Office'},
+     'company': 'Loop Studio', 'phone': '+1 (212) 555-0181', 'plan': 'Private Office'},
     {'email': 'priya@northwind.io', 'first_name': 'Priya', 'last_name': 'Nair',
-     'company': 'Northwind', 'plan': 'Northwind (Custom)'},
+     'company': 'Northwind', 'phone': '+1 (212) 555-0194', 'plan': 'Northwind (Custom)'},
     {'email': 'sara@pixellab.co', 'first_name': 'Sara', 'last_name': 'Lin',
-     'company': 'Pixel Lab', 'plan': 'Dedicated Desk'},
+     'company': 'Pixel Lab', 'phone': '+1 (212) 555-0126', 'plan': 'Dedicated Desk'},
     {'email': 'omar@drift.co', 'first_name': 'Omar', 'last_name': 'Said',
-     'company': 'Drift', 'plan': 'Hot Desk'},
+     'company': 'Drift', 'phone': '+1 (212) 555-0137', 'plan': 'Hot Desk'},
     {'email': 'lena@foldwork.co', 'first_name': 'Lena', 'last_name': 'Park',
-     'company': 'Foldwork', 'plan': 'Dedicated Desk'},
+     'company': 'Foldwork', 'phone': '+1 (212) 555-0158', 'plan': 'Dedicated Desk'},
 ]
 
 SITE_CONTENT = {
@@ -230,12 +230,13 @@ class Command(BaseCommand):
         member, _ = User.objects.get_or_create(
             email='mohammad@loopstudio.co',
             defaults={'first_name': 'Mohammad', 'last_name': 'Moussa',
-                      'company': 'Loop Studio', 'role': User.Role.MEMBER,
-                      'is_approved': True},
+                      'company': 'Loop Studio', 'phone': '+1 (212) 555-0110',
+                      'role': User.Role.MEMBER, 'is_approved': True},
         )
         member.set_password('demo1234')
         member.is_approved = True
         member.company = 'Loop Studio'
+        member.phone = '+1 (212) 555-0110'
         member.save()
 
         this_period = date.today().strftime('%Y-%m')
@@ -291,11 +292,13 @@ class Command(BaseCommand):
             u, _ = User.objects.get_or_create(
                 email=c['email'],
                 defaults={'first_name': c['first_name'], 'last_name': c['last_name'],
-                          'company': c['company'], 'role': User.Role.MEMBER, 'is_approved': True},
+                          'company': c['company'], 'phone': c['phone'],
+                          'role': User.Role.MEMBER, 'is_approved': True},
             )
             u.set_password('demo1234')
             u.is_approved = True
             u.company = c['company']
+            u.phone = c['phone']
             u.save()
             m_defaults = {'plan': plans[c['plan']], 'status': Membership.Status.ACTIVE,
                           'member_since': date(2024, 6, 1), 'hours_period': this_period}
@@ -324,7 +327,7 @@ class Command(BaseCommand):
 
         # Demo accounts skip the email-confirmation gate — nothing is actually
         # mailed when seeding, and unverified accounts can't log in.
-        User.objects.update(email_verified=True)
+        User.objects.update(email_verified=True, phone_required=False)
 
         # Reservations across clients (mix of pending / confirmed / paid).
         Booking.objects.filter(user__in=clients.values()).delete()

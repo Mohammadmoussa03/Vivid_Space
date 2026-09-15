@@ -34,8 +34,8 @@ class AdminUserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = (
-            'id', 'uuid', 'email', 'first_name', 'last_name', 'company', 'full_name',
-            'role', 'is_approved', 'is_active', 'date_joined', 'plan',
+            'id', 'uuid', 'email', 'first_name', 'last_name', 'company', 'phone',
+            'full_name', 'role', 'is_approved', 'is_active', 'date_joined', 'plan',
             'schedule_change_requested', 'schedule_change_days',
             'room_hours_left', 'room_hours_used', 'effective_hours', 'space_hours',
             'shared_hours_apply',

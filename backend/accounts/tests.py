@@ -468,6 +468,24 @@ class GoogleSignInTests(APITestCase):
         self.assertFalse(resp.data['created'])
         self.assertEqual(User.objects.count(), 1)
         self.assertEqual(existing.social_accounts.count(), 1)
+
+    def test_a_google_signup_is_still_asked_for_a_phone_number(self):
+        """Google asserts an identity, never a phone number — so the prompt has
+        to catch this door too, or "every new signup has a number" is false."""
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID=self.CLIENT_ID):
+            resp = self._post(self._token())
+        self.assertTrue(resp.data['created'])
+        self.assertTrue(resp.data['user']['needs_phone'])
+
+    def test_linking_google_to_a_grandfathered_account_does_not_prompt(self):
+        existing = User.objects.create_user(
+            email='gina@example.com', password='S3cure-pass!',
+            is_approved=True, email_verified=True, role=User.Role.MEMBER)
+        User.objects.filter(pk=existing.pk).update(phone_required=False)
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID=self.CLIENT_ID):
+            resp = self._post(self._token())
+        self.assertFalse(resp.data['created'])
+        self.assertFalse(resp.data['user']['needs_phone'])
         # The password still works — linking adds a way in, it doesn't replace one.
         existing.refresh_from_db()
         self.assertTrue(existing.check_password('S3cure-pass!'))
@@ -596,3 +614,149 @@ class BrandedEmailTests(APITestCase):
         self.assertEqual(send_branded_mail('s', 'b', ''), 0)
         self.assertEqual(send_branded_mail('s', 'b', []), 0)
         self.assertEqual(len(mail.outbox), 0)
+
+
+class ProfileEditTests(APITestCase):
+    """The member-facing account editor (PATCH /auth/me/)."""
+
+    PASSWORD = 'S3cure-pass!'
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email='member@example.com', password=self.PASSWORD, is_approved=True,
+            email_verified=True, role=User.Role.MEMBER, first_name='Mem', last_name='Ber',
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def test_a_member_can_edit_every_field_the_form_offers(self):
+        resp = self.client.patch(reverse('me'), {
+            'first_name': 'Alex', 'last_name': 'Rivera', 'company': 'Loop Studio',
+            'phone': '+961 70 123 456', 'email': 'member@example.com',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, 'Alex')
+        self.assertEqual(self.user.company, 'Loop Studio')
+        self.assertEqual(self.user.phone, '+961 70 123 456')
+
+    def test_a_member_can_change_a_number_they_already_gave(self):
+        self.client.patch(reverse('me'), {'phone': '+961 70 111 111'}, format='json')
+        resp = self.client.patch(reverse('me'), {'phone': '+961 71 222 222'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['phone'], '+961 71 222 222')
+
+    def test_editing_a_name_does_not_require_a_phone_number(self):
+        """A grandfathered member has no number; the form omits the empty field
+        rather than blocking every other edit behind it."""
+        resp = self.client.patch(reverse('me'), {'first_name': 'Solo'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, 'Solo')
+        self.assertEqual(self.user.phone, '')
+
+    def test_a_duplicate_email_is_refused_without_confirming_it_exists(self):
+        User.objects.create_user(email='taken@example.com', password=self.PASSWORD,
+                                 is_approved=True, email_verified=True)
+        resp = self.client.patch(reverse('me'), {'email': 'taken@example.com'},
+                                 format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        # DRF's UniqueValidator would say "user with this email already exists",
+        # which is an enumeration oracle. The neutral message must win.
+        self.assertNotIn('already exists', str(resp.data).lower())
+
+    def test_saving_an_unchanged_email_still_works(self):
+        resp = self.client.patch(reverse('me'), {
+            'email': 'member@example.com', 'first_name': 'Same'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+
+class PhonePromptTests(APITestCase):
+    """The "enter your phone number to continue" gate.
+
+    The prompt itself is frontend, but what drives it — `needs_phone` — is the
+    server's call, and the whole point is that it fires for new accounts only.
+    """
+
+    PASSWORD = 'S3cure-pass!'
+
+    def _member(self, email, **extra):
+        return User.objects.create_user(
+            email=email, password=self.PASSWORD, is_approved=True,
+            email_verified=True, role=User.Role.MEMBER, **extra,
+        )
+
+    def test_existing_members_are_grandfathered_by_the_migration(self):
+        # Migration 0007 flips every pre-existing row to phone_required=False.
+        # Simulate one by writing the post-migration state directly.
+        legacy = self._member('legacy@example.com')
+        User.objects.filter(pk=legacy.pk).update(phone_required=False)
+        legacy.refresh_from_db()
+        self.assertFalse(legacy.needs_phone)
+
+    def test_a_password_signup_is_asked_for_a_number(self):
+        resp = self.client.post(reverse('register'), {
+            'email': 'newbie@example.com', 'password': self.PASSWORD,
+            'first_name': 'New', 'last_name': 'Bie',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        user = User.objects.get(email='newbie@example.com')
+        self.assertTrue(user.phone_required)
+        self.assertTrue(user.needs_phone)
+
+    def test_registration_does_not_require_a_phone_number(self):
+        """The number is collected after sign-in, so signup must not demand it."""
+        resp = self.client.post(reverse('register'), {
+            'email': 'nophone@example.com', 'password': self.PASSWORD,
+            'first_name': 'No', 'last_name': 'Phone',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_needs_phone_is_reported_to_the_client(self):
+        user = self._member('asked@example.com')
+        self.client.force_authenticate(user=user)
+        resp = self.client.get(reverse('me'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp.data['needs_phone'])
+        self.assertEqual(resp.data['phone'], '')
+
+    def test_answering_the_prompt_clears_it(self):
+        user = self._member('answers@example.com')
+        self.client.force_authenticate(user=user)
+        resp = self.client.patch(reverse('me'), {'phone': '+961 70 123 456'},
+                                 format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # The response is what the frontend stores, so it must already say the
+        # gate is satisfied — otherwise the modal never unmounts.
+        self.assertFalse(resp.data['needs_phone'])
+        self.assertEqual(resp.data['phone'], '+961 70 123 456')
+        user.refresh_from_db()
+        self.assertFalse(user.needs_phone)
+
+    def test_a_number_without_enough_digits_is_rejected(self):
+        user = self._member('sneaky@example.com')
+        self.client.force_authenticate(user=user)
+        for junk in ('', '   ', 'n/a', '12345'):
+            resp = self.client.patch(reverse('me'), {'phone': junk}, format='json')
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, junk)
+        user.refresh_from_db()
+        self.assertTrue(user.needs_phone)
+
+    def test_punctuation_and_spacing_are_preserved(self):
+        """No format opinion: members are international and type what they type."""
+        user = self._member('intl@example.com')
+        self.client.force_authenticate(user=user)
+        resp = self.client.patch(reverse('me'), {'phone': '  +1 (212) 555-0100  '},
+                                 format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['phone'], '+1 (212) 555-0100')
+
+    def test_an_anonymous_caller_cannot_set_a_phone_number(self):
+        resp = self.client.patch(reverse('me'), {'phone': '+961 70 123 456'},
+                                 format='json')
+        self.assertIn(resp.status_code,
+                      (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_a_superuser_is_never_prompted(self):
+        boss = User.objects.create_superuser(email='boss@example.com',
+                                             password=self.PASSWORD)
+        self.assertFalse(boss.needs_phone)

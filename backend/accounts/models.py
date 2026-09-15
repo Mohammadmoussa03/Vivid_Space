@@ -44,6 +44,7 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault('is_superuser', True)
         extra_fields.setdefault('is_approved', True)
         extra_fields.setdefault('email_verified', True)
+        extra_fields.setdefault('phone_required', False)
         if extra_fields.get('is_staff') is not True:
             raise ValueError('Superuser must have is_staff=True.')
         if extra_fields.get('is_superuser') is not True:
@@ -66,6 +67,15 @@ class User(AbstractBaseUser, PermissionsMixin):
     first_name = models.CharField(max_length=80, blank=True)
     last_name = models.CharField(max_length=80, blank=True)
     company = models.CharField(max_length=160, blank=True)
+    # Contact number. Blank is a legal stored value -- see `phone_required`.
+    phone = models.CharField(max_length=40, blank=True)
+
+    # Whether this account still owes us a number. Every account created since
+    # migration 0006 starts True and is asked for one the first time it lands on
+    # the site signed in; everyone who predates the field was grandfathered to
+    # False, so existing members are never prompted. Admin accounts are created
+    # with False -- the prompt lives on the public site, not the admin panel.
+    phone_required = models.BooleanField(default=True)
 
     role = models.CharField(max_length=10, choices=Role.choices, default=Role.MEMBER)
 
@@ -102,6 +112,15 @@ class User(AbstractBaseUser, PermissionsMixin):
     def full_name(self):
         name = f'{self.first_name} {self.last_name}'.strip()
         return name or self.email
+
+    @property
+    def needs_phone(self):
+        """True while the phone prompt should still be shown to this member.
+
+        Answering once settles it for good, by whichever route the number
+        arrives (the prompt, the account form, or an admin typing it in).
+        """
+        return self.phone_required and not self.phone.strip()
 
     @property
     def is_admin(self):

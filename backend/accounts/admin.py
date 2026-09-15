@@ -20,12 +20,13 @@ class UserAdmin(BaseUserAdmin):
     list_display = ('email', 'first_name', 'last_name', 'role', 'email_verified',
                     'is_approved', 'is_active')
     list_filter = ('role', 'email_verified', 'is_approved', 'is_active', 'is_staff')
-    search_fields = ('email', 'first_name', 'last_name', 'company')
+    search_fields = ('email', 'first_name', 'last_name', 'company', 'phone')
     readonly_fields = ('date_joined', 'last_login')
 
     fieldsets = (
         (None, {'fields': ('email', 'password')}),
-        ('Profile', {'fields': ('first_name', 'last_name', 'company')}),
+        ('Profile', {'fields': ('first_name', 'last_name', 'company', 'phone',
+                                'phone_required')}),
         ('Access', {'fields': ('role', 'email_verified', 'is_approved', 'is_active',
                                'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
         ('Dates', {'fields': ('last_login', 'date_joined')}),

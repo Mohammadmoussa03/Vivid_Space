@@ -9,7 +9,7 @@ import { googleEnabled, initGoogleIdentity } from '../lib/google';
 import {
   getSite, getPublicPackages, getCategories, getPublicSpaces, getFaqs,
   getAvailability, createBooking, createOrder, submitTour, submitCustomization, getOverview, getBookings, cancelBooking,
-  requestBookingChange, requestScheduleChange,
+  requestBookingChange, requestScheduleChange, updateProfile,
 } from '../lib/services';
 
 /* ---------------- static design content (no backend equivalent) ---------------- */
@@ -759,6 +759,11 @@ export default function Landing() {
       {authOpen && <AuthModal onClose={() => { setAuthOpen(false); setResetInfo(null); setVerifyInfo(null); }} onAuthed={onAuthed} goDashboard={goDashboard} resetInfo={resetInfo} verifyInfo={verifyInfo} />}
       {dashOpen && <DashboardModal user={user} onClose={() => setDashOpen(false)} />}
 
+      {/* Sits above every other modal: a new member can't use the site until
+          they've left a number. Mounted as a sibling of <header> — the nav's
+          backdrop-filter would otherwise be the containing block for it. */}
+      {user?.needs_phone && <PhoneGateModal />}
+
       {/* Floating WhatsApp click-to-chat (hidden while the dashboard is open). */}
       {!dashOpen && <WhatsAppBubble number={site?.contact?.whatsapp} message={site?.contact?.whatsapp_message} />}
     </div>
@@ -1466,6 +1471,83 @@ function OrDivider() {
   );
 }
 
+/* ---------------- Phone gate (new signups only) ---------------- */
+// Shown to a signed-in member whose account still owes us a contact number —
+// anyone who signed up after the field existed, whichever door they came in by
+// (password or Google). Members who predate it were grandfathered out of the
+// prompt server-side (`needs_phone`), so they never see this.
+//
+// Deliberately not dismissible — no ✕, no click-outside — because the number is
+// the point; the only ways past it are answering or signing out.
+function PhoneGateModal() {
+  const { user, setUser, logout } = useAuth();
+  const [phone, setPhone] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    // Mirrors the server's rule (accounts/serializers.clean_phone): enough
+    // digits to be dialable, no format opinion — members are international.
+    if (phone.replace(/\D/g, '').length < 6) { setErr('Enter a valid phone number.'); return; }
+    setBusy(true);
+    try {
+      // The response is the full user shape with needs_phone now false, which
+      // is what unmounts this modal.
+      setUser(await updateProfile({ phone: phone.trim() }));
+    } catch (ex) {
+      setErr(apiError(ex, "We couldn't save that number. Please try again."));
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ ...overlay(0.68), zIndex: 200 }}>
+      <form
+        onSubmit={submit}
+        style={{ position: 'relative', background: MS.panel, width: 'min(440px, 100%)', borderRadius: 22,
+          padding: 'clamp(28px,4vw,40px)', boxShadow: '0 30px 80px rgba(20,18,16,0.32)',
+          animation: 'ms-modal 220ms ease-out both', display: 'flex', flexDirection: 'column', gap: 15 }}
+      >
+        <div style={{ textAlign: 'center', marginBottom: 6 }}>
+          <img src={logoColor} alt="VividSpace" style={{ height: 66, width: 'auto', display: 'inline-block' }} />
+        </div>
+        <h3 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 24, margin: 0, textAlign: 'center' }}>
+          Enter your phone number to continue
+        </h3>
+        <p style={{ textAlign: 'center', fontSize: 14.5, color: MS.muted, margin: '0 0 6px', lineHeight: 1.5 }}>
+          {user?.first_name ? `Almost there, ${user.first_name}. ` : 'Almost there. '}
+          We use it to confirm bookings and reach you about your visits.
+        </p>
+        {err && (
+          <p style={{ background: 'rgba(168,90,74,0.12)', color: MS.red, fontSize: 13.5, fontWeight: 500,
+            padding: '11px 14px', borderRadius: 10, margin: 0, lineHeight: 1.4 }}>{err}</p>
+        )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+          <label style={{ fontSize: 14, fontWeight: 500 }}>Phone number</label>
+          <input
+            value={phone}
+            onChange={(e) => { setPhone(e.target.value); setErr(''); }}
+            type="tel" inputMode="tel" autoComplete="tel" autoFocus
+            placeholder="+961 70 123 456" className="ms-input" style={inputStyle}
+          />
+        </div>
+        <button type="submit" disabled={busy}
+          style={{ ...purpleBtn, width: '100%', padding: 14, marginTop: 4, opacity: busy ? 0.7 : 1 }}>
+          {busy ? 'Please wait…' : 'Continue'}
+        </button>
+        <p style={{ textAlign: 'center', fontSize: 14, color: MS.muted, margin: '6px 0 0' }}>
+          Not you?{' '}
+          <button type="button" onClick={logout}
+            style={{ background: 'none', border: 'none', color: MS.accent, fontSize: 14, fontWeight: 600, cursor: 'pointer', padding: 0 }}>
+            Sign out
+          </button>
+        </p>
+      </form>
+    </div>
+  );
+}
+
 /* ---------------- Auth modal (login / register / forgot) ---------------- */
 function AuthModal({ onClose, onAuthed, goDashboard, resetInfo, verifyInfo }) {
   const { login, loginWithGoogle, register, requestReset, confirmReset, verifyEmail, resendVerification, logout, user, isAuthed } = useAuth();
@@ -2127,6 +2209,7 @@ function DashboardModal({ user, onClose }) {
   // A reschedule request was submitted — reflect the now-locked booking.
   const onRescheduled = () => { setReschedule(null); setDetail(null); load(tab); };
 
+  const [accountEdit, setAccountEdit] = useState(false);     // account-details editor open
   const [scheduleEdit, setScheduleEdit] = useState(false);   // package-schedule editor open
   // A schedule change was submitted — refresh the membership to show the pending state.
   const onScheduleRequested = () => { setScheduleEdit(false); getOverview().then(setOverview).catch(() => {}); };
@@ -2178,10 +2261,13 @@ function DashboardModal({ user, onClose }) {
         <div style={{ maxWidth: 1180, margin: '0 auto', height: 72, padding: '0 clamp(16px,4vw,32px)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
           <img src={logoColor} alt="VividSpace" style={{ height: 46, width: 'auto', display: 'block' }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, minWidth: 0 }}>
-            <span style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+            {/* The avatar is the conventional way into account settings, so it
+                opens the editor rather than being decoration. */}
+            <button onClick={() => setAccountEdit(true)} title="Your details"
+              style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, background: 'none', border: 'none', padding: 0, font: 'inherit', color: MS.ink, cursor: 'pointer' }}>
               <span style={{ width: 34, height: 34, flex: '0 0 auto', borderRadius: 9999, background: MS.accent2, color: MS.ink, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MS.serif, fontWeight: 700, fontSize: 16 }}>{(name[0] || 'M').toUpperCase()}</span>
               <span style={{ fontSize: 14, fontWeight: 500, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{user?.full_name || name}</span>
-            </span>
+            </button>
             <button onClick={onClose} style={{ flex: '0 0 auto', background: 'none', border: `1px solid ${MS.line}`, borderRadius: 9999, padding: '9px 18px', fontSize: 14, fontWeight: 500, color: MS.ink, cursor: 'pointer' }}>Back to site</button>
             <button onClick={async () => { await logout(); onClose(); }} style={{ flex: '0 0 auto', background: MS.ink, border: `1px solid ${MS.ink}`, borderRadius: 9999, padding: '9px 18px', fontSize: 14, fontWeight: 500, color: MS.panel, cursor: 'pointer' }}>Log out</button>
           </div>
@@ -2319,6 +2405,24 @@ function DashboardModal({ user, onClose }) {
             );
           })}
         </div>
+
+        <div style={{ background: '#fff', border: `1px solid ${MS.line}`, borderRadius: 16, padding: 'clamp(20px,3vw,28px)', marginTop: 44 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 18 }}>
+            <div>
+              <h2 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 'clamp(20px,2.6vw,24px)', margin: 0 }}>Your details</h2>
+              <p style={{ color: MS.muted, fontSize: 13.5, margin: '4px 0 0' }}>How we reach you about your bookings.</p>
+            </div>
+            <button onClick={() => setAccountEdit(true)} style={{ flex: '0 0 auto', background: 'none', border: `1px solid ${MS.accent}`, color: MS.accent, fontSize: 13.5, fontWeight: 600, padding: '8px 16px', borderRadius: 9999, cursor: 'pointer' }}>Edit details</button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14 }}>
+            {[['Name', user?.full_name], ['Email', user?.email], ['Phone', user?.phone], ['Company', user?.company]].map(([label, value]) => (
+              <div key={label} style={{ border: `1px solid ${MS.line}`, borderRadius: 13, padding: '14px 16px', minWidth: 0 }}>
+                <p style={{ fontSize: 12, letterSpacing: '0.1em', textTransform: 'uppercase', color: MS.faint, margin: '0 0 7px' }}>{label}</p>
+                <p style={{ fontSize: 14.5, fontWeight: 500, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value || '—'}</p>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
 
       {detail && (
@@ -2353,6 +2457,105 @@ function DashboardModal({ user, onClose }) {
 
       {reschedule && <RescheduleModal booking={reschedule} onClose={() => setReschedule(null)} onDone={onRescheduled} />}
       {scheduleEdit && <ScheduleEditModal components={editableComps} onClose={() => setScheduleEdit(false)} onDone={onScheduleRequested} />}
+      {accountEdit && <AccountEditModal onClose={() => setAccountEdit(false)} />}
+    </div>
+  );
+}
+
+/* ---------------- Account editor (member edits their own details) ---------------- */
+// The one place a member can change the details we hold on them — including the
+// phone number collected by <PhoneGateModal>, which is why this exists.
+//
+// Saves through PATCH /auth/me/ (ProfileUpdateSerializer). The response is the
+// full user shape, so it goes straight back into auth state.
+function AccountEditModal({ onClose }) {
+  const { user, setUser } = useAuth();
+  const [f, setF] = useState({
+    first_name: user?.first_name || '', last_name: user?.last_name || '',
+    email: user?.email || '', phone: user?.phone || '', company: user?.company || '',
+  });
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const set = (k) => (v) => { setF((s) => ({ ...s, [k]: v })); setErr(''); };
+
+  // A member who already has a number can change it but not blank it — the
+  // server would reject the empty string anyway, and silently dropping it from
+  // the payload would look like the save had failed.
+  const phoneWasSet = !!(user?.phone || '').trim();
+  const emailChanged = f.email.trim().toLowerCase() !== (user?.email || '');
+
+  const save = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    if (!f.email.trim()) { setErr('Email is required.'); return; }
+    const phone = f.phone.trim();
+    if ((phoneWasSet || phone) && phone.replace(/\D/g, '').length < 6) {
+      setErr('Enter a valid phone number.'); return;
+    }
+    setBusy(true);
+    try {
+      // Omit an empty phone entirely: a member who predates the prompt and
+      // still has no number must be able to save a name change.
+      setUser(await updateProfile({
+        first_name: f.first_name.trim(), last_name: f.last_name.trim(),
+        email: f.email.trim(), company: f.company.trim(),
+        ...(phone ? { phone } : {}),
+      }));
+      onClose();
+    } catch (ex) {
+      setErr(apiError(ex, "We couldn't save your details. Please try again."));
+    } finally { setBusy(false); }
+  };
+
+  const field = (label, k, type = 'text', placeholder = '', extra = {}) => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 7, minWidth: 0 }}>
+      <label style={{ fontSize: 14, fontWeight: 500 }}>{label}</label>
+      <input value={f[k]} onChange={(e) => set(k)(e.target.value)} type={type}
+        placeholder={placeholder} className="ms-input" style={inputStyle} {...extra} />
+    </div>
+  );
+
+  return (
+    <div onClick={onClose} style={overlay()}>
+      <form onClick={(e) => e.stopPropagation()} onSubmit={save}
+        style={{ position: 'relative', background: MS.panel, width: 'min(520px, 100%)', borderRadius: 22,
+          padding: 'clamp(26px,4vw,36px)', boxShadow: '0 30px 80px rgba(20,18,16,0.32)',
+          animation: 'ms-modal 220ms ease-out both', maxHeight: '90vh', overflowY: 'auto',
+          display: 'flex', flexDirection: 'column', gap: 15 }}
+      >
+        <button type="button" onClick={onClose} aria-label="Close"
+          style={{ position: 'absolute', top: 18, right: 20, width: 38, height: 38, borderRadius: 9999, border: `1px solid ${MS.line}`, background: '#fff', color: MS.ink, fontSize: 16, cursor: 'pointer' }}>✕</button>
+        <div>
+          <p style={{ color: MS.accent, fontSize: 12, fontWeight: 600, letterSpacing: '0.16em', textTransform: 'uppercase', margin: '0 0 8px' }}>Account</p>
+          <h3 style={{ fontFamily: MS.serif, fontWeight: 700, fontSize: 26, margin: 0 }}>Your details</h3>
+        </div>
+        {err && (
+          <p style={{ background: 'rgba(168,90,74,0.12)', color: MS.red, fontSize: 13.5, fontWeight: 500,
+            padding: '11px 14px', borderRadius: 10, margin: 0, lineHeight: 1.4 }}>{err}</p>
+        )}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 15 }}>
+          {field('First name', 'first_name', 'text', 'Alex')}
+          {field('Last name', 'last_name', 'text', 'Rivera')}
+        </div>
+        {field('Email', 'email', 'email', 'you@company.com',
+          { autoCapitalize: 'none', autoCorrect: 'off', spellCheck: false })}
+        {emailChanged && (
+          <p style={{ color: MS.muted, fontSize: 13, margin: '-6px 0 0', lineHeight: 1.5 }}>
+            This is the address you log in with — you'll need the new one next time you sign in.
+          </p>
+        )}
+        {field('Phone number', 'phone', 'tel', '+961 70 123 456',
+          { inputMode: 'tel', autoComplete: 'tel' })}
+        {field('Company', 'company', 'text', 'Optional')}
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 6 }}>
+          <button type="submit" disabled={busy}
+            style={{ ...purpleBtn, flex: '1 1 auto', padding: 13, opacity: busy ? 0.7 : 1 }}>
+            {busy ? 'Saving…' : 'Save changes'}
+          </button>
+          <button type="button" onClick={onClose}
+            style={{ ...ghostBtn, flex: '0 1 auto', padding: '12px 24px' }}>Cancel</button>
+        </div>
+      </form>
     </div>
   );
 }

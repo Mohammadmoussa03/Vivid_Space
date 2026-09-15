@@ -295,7 +295,7 @@ function Users({ query }) {
   });
   // One fixed template shared by the header and every row so columns line up
   // regardless of how many action buttons a row shows (fixed-width Actions col).
-  const cols = 'minmax(180px,2fr) minmax(110px,1.2fr) 165px 110px 110px 250px';
+  const cols = 'minmax(180px,2fr) minmax(130px,1.1fr) minmax(110px,1.2fr) 165px 110px 110px 250px';
 
   return (
     <>
@@ -329,9 +329,9 @@ function Users({ query }) {
         {pendingSchedule.length > 0 && <FilterPill label={`Schedule changes (${pendingSchedule.length})`} active={filter === 'schedule'} onClick={() => setFilter('schedule')} />}
       </div>
       <div style={{ ...card, overflowX: 'auto' }}>
-       <div style={{ minWidth: 925 }}>
+       <div style={{ minWidth: 1071 }}>
         <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 16, padding: '14px 22px', borderBottom: `1px solid ${MS.line}`, ...th }}>
-          <span>Member</span><span>Plan</span><span>Meeting-room hours</span><span>Status</span><span>Joined</span><span style={{ textAlign: 'right' }}>Actions</span>
+          <span>Member</span><span>Phone</span><span>Plan</span><span>Meeting-room hours</span><span>Status</span><span>Joined</span><span style={{ textAlign: 'right' }}>Actions</span>
         </div>
         {filtered.length === 0 && <div style={{ padding: 30, textAlign: 'center', color: MS.faint }}>No matching users.</div>}
         {filtered.map((u) => {
@@ -346,6 +346,10 @@ function Users({ query }) {
                   <p style={{ fontSize: 12.5, color: MS.faint, margin: '1px 0 0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{u.email}</p>
                 </div>
               </div>
+              {/* Members who predate the phone prompt have none on file — an em
+                  dash rather than a blank cell, matching the Plan column. */}
+              <span style={{ fontSize: 14, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                title={u.phone || ''}>{u.phone || '—'}</span>
               <span style={{ fontSize: 14, minWidth: 0 }}>
                 {u.plan || '—'}
                 {u.schedule_change_requested && <span style={{ marginLeft: 8, display: 'inline-block' }}>{pill(TONES.lilac.bg, TONES.lilac.color, `Schedule change${u.schedule_change_days ? ` · ${u.schedule_change_days}d` : ''}`)}</span>}

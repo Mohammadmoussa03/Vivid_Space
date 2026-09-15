@@ -8,19 +8,36 @@ from .models import normalize_email
 User = get_user_model()
 
 
+def clean_phone(value):
+    """Validate a member-supplied contact number, permissively.
+
+    Deliberately not a format check: members are international and type numbers
+    with spaces, dashes, parentheses and a leading +. All we insist on is that
+    there are enough digits for the number to be dialable, which is what rules
+    out someone typing a space to get past the prompt.
+    """
+    value = (value or '').strip()
+    if len(''.join(c for c in value if c.isdigit())) < 6:
+        raise serializers.ValidationError('Enter a valid phone number.')
+    return value
+
+
 class UserSerializer(serializers.ModelSerializer):
     """Public shape of a user, as consumed by the frontend AuthContext."""
 
     full_name = serializers.CharField(read_only=True)
+    # Drives the "add your number" prompt on the public site.
+    needs_phone = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = User
         fields = (
-            'id', 'uuid', 'email', 'first_name', 'last_name', 'company',
-            'role', 'is_approved', 'email_verified', 'full_name', 'date_joined',
+            'id', 'uuid', 'email', 'first_name', 'last_name', 'company', 'phone',
+            'role', 'is_approved', 'email_verified', 'needs_phone', 'full_name',
+            'date_joined',
         )
         read_only_fields = ('id', 'uuid', 'role', 'is_approved', 'email_verified',
-                            'full_name', 'date_joined')
+                            'needs_phone', 'full_name', 'date_joined')
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -89,9 +106,18 @@ class LoginSerializer(TokenObtainPairSerializer):
 class ProfileUpdateSerializer(serializers.ModelSerializer):
     """Editable profile fields from the Account page."""
 
+    # Declared explicitly for the same reason as RegisterSerializer: it stops
+    # DRF attaching a UniqueValidator, whose default message ("user with this
+    # email already exists") would confirm that an address is registered. The
+    # neutral check in validate_email below handles uniqueness instead.
+    email = serializers.EmailField()
+
     class Meta:
         model = User
-        fields = ('first_name', 'last_name', 'email', 'company')
+        fields = ('first_name', 'last_name', 'email', 'company', 'phone')
+
+    def validate_phone(self, value):
+        return clean_phone(value)
 
     def validate_email(self, value):
         value = normalize_email(value)
